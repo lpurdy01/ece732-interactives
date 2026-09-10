@@ -1,0 +1,27 @@
+---
+import '../styles/global.css';
+import 'katex/dist/katex.min.css';
+import ProvenanceNote from '../components/ProvenanceNote.astro';
+
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <!-- Not indexed: the private build contains course material. -->
+    <meta name="robots" content="noindex, nofollow" />
+  </head>
+  <body>
+    <main>
+      <slot />
+      <ProvenanceNote />
+    </main>
+  </body>
+</html>

@@ -1,0 +1,243 @@
+---
+// Geometric View of Eigenvectors (W1L3, slides 28-38).
+//
+// The lecture's specific point, made on slide 32 and proved on slide 35:
+// eigenvectors of M are NOT the major/minor axes of the output ellipse --
+// eigenvectors of M*M^T are. That distinction is hard to hold in your head and
+// obvious once you can drag it around, which is the whole reason this exists.
+---
+
+<div class="interactive" id="eig-geo">
+  <div class="controls">
+    <div class="matrix-input">
+      <span class="mlabel">M =</span>
+      <div class="grid2">
+        <input type="number" id="m11" value="1.4" step="0.1" aria-label="m11" />
+        <input type="number" id="m12" value="0.8" step="0.1" aria-label="m12" />
+        <input type="number" id="m21" value="0.3" step="0.1" aria-label="m21" />
+        <input type="number" id="m22" value="0.9" step="0.1" aria-label="m22" />
+      </div>
+    </div>
+
+    <div class="toggles">
+      <label><input type="checkbox" id="showEig" checked /> eigenvectors of <b>M</b></label>
+      <label><input type="checkbox" id="showSvd" /> eigenvectors of <b>MMᵀ</b> (ellipse axes)</label>
+      <label><input type="checkbox" id="showIter" /> repeated application (M², M³)</label>
+    </div>
+
+    <div class="presets">
+      <button data-preset="1.4,0.8,0.3,0.9">stretch + shear</button>
+      <button data-preset="2,0,0,0.5">pure scaling</button>
+      <button data-preset="0.707,-0.707,0.707,0.707">rotation</button>
+      <button data-preset="2,1,1,2">symmetric</button>
+      <button data-preset="-1,0,0,2">negative λ</button>
+      <button data-preset="2,0,0,2">M = 2I</button>
+    </div>
+  </div>
+
+  <canvas id="eig-canvas" class="square" role="img"
+          aria-label="Unit circle of input vectors mapped to an output ellipse, with eigenvectors drawn"></canvas>
+
+  <p class="hint">Drag the blue input vector <b>u</b> around the circle and watch <b>v = Mu</b> trace the ellipse.</p>
+
+  <div class="readout" id="eig-readout"></div>
+</div>
+
+<script>
+  import { eigen2, apply2, mul2, transpose2, type Mat2, type Vec2 } from '../lib/linalg';
+  import { makeView, drawAxes, drawArrow, drawPolyline, label, themeColors } from '../lib/plot';
+
+  const root = document.getElementById('eig-geo')!;
+  const canvas = root.querySelector<HTMLCanvasElement>('#eig-canvas')!;
+  const readout = root.querySelector<HTMLDivElement>('#eig-readout')!;
+  const inputs = ['m11', 'm12', 'm21', 'm22'].map(
+    (id) => root.querySelector<HTMLInputElement>('#' + id)!);
+  const showEig = root.querySelector<HTMLInputElement>('#showEig')!;
+  const showSvd = root.querySelector<HTMLInputElement>('#showSvd')!;
+  const showIter = root.querySelector<HTMLInputElement>('#showIter')!;
+
+  let angle = Math.PI / 5;          // position of the draggable input vector
+  let dragging = false;
+
+  const readMatrix = (): Mat2 =>
+    inputs.map((el) => parseFloat(el.value) || 0) as unknown as Mat2;
+
+  const fmt = (x: number) => (Math.abs(x) < 5e-3 ? '0' : x.toFixed(2));
+
+  function circle(n = 240): Array<[number, number]> {
+    return Array.from({ length: n + 1 }, (_, i) => {
+      const t = (i / n) * Math.PI * 2;
+      return [Math.cos(t), Math.sin(t)] as [number, number];
+    });
+  }
+
+  function draw() {
+    const M = readMatrix();
+    const image = circle().map((p) => apply2(M, p));
+    const extent = Math.max(
+      1.35,
+      ...image.map(([x, y]) => Math.max(Math.abs(x), Math.abs(y))) ,
+    ) * 1.15;
+
+    const view = makeView(canvas, {
+      xMin: -extent, xMax: extent, yMin: -extent, yMax: extent, equalAspect: true,
+    });
+    const c = themeColors();
+    const step = extent > 4 ? 2 : 1;
+    const ticks: number[] = [];
+    for (let t = -Math.floor(extent); t <= Math.floor(extent); t += step)
+      if (t !== 0) ticks.push(t);
+    drawAxes(view, { xTicks: ticks, yTicks: ticks });
+
+    // Unit circle of inputs, and its image under M.
+    drawPolyline(view, circle(), c.muted, 1.25, [4, 4]);
+    drawPolyline(view, image, c.series[0], 2);
+
+    if (showIter.checked) {
+      const M2 = mul2(M, M);
+      const M3 = mul2(M2, M);
+      drawPolyline(view, circle().map((p) => apply2(M2, p)), c.series[1], 1.5, [6, 3]);
+      drawPolyline(view, circle().map((p) => apply2(M3, p)), c.series[2], 1.25, [2, 4]);
+    }
+
+    const eig = eigen2(M);
+
+    // Eigenvectors of MM^T: these ARE the ellipse axes (slide 35).
+    if (showSvd.checked) {
+      const sym = eigen2(mul2(M, transpose2(M)));
+      if (sym.real) {
+        for (let i = 0; i < 2; i++) {
+          const axis = sym.vectors[i];
+          const len = Math.sqrt(Math.max(sym.lambda[i], 0));
+          drawArrow(view, [-axis[0] * len, -axis[1] * len],
+                    [axis[0] * len, axis[1] * len], c.series[4], 2.5);
+          // Label the negative end: the positive end is where the lambda
+          // labels live, and the two collide badly when M is near symmetric.
+          label(view, `σ${i + 1}=${fmt(len)}`,
+                [-axis[0] * len * 1.08, -axis[1] * len * 1.08], c.series[4],
+                axis[0] > 0 ? 'right' : 'left');
+        }
+      }
+    }
+
+    // Eigenvectors of M itself: directions the map leaves unrotated.
+    if (showEig.checked && eig.real) {
+      const directions = eig.defective ? 1 : 2;   // no fictitious second axis
+      for (let i = 0; i < directions; i++) {
+        const v = eig.vectors[i];
+        const reach = extent * 0.92;
+        drawPolyline(view, [[-v[0] * reach, -v[1] * reach], [v[0] * reach, v[1] * reach]],
+                     c.accent, 1, [3, 5]);
+        const lam = eig.lambda[i];
+        drawArrow(view, [0, 0], [v[0] * lam, v[1] * lam], c.accent, 2.5);
+        // Offset perpendicular to the arrow, not always downward: a fixed
+        // downward nudge collides with v = Mu whenever an arrow lies along the
+        // horizontal axis, which is exactly the negative-eigenvalue case.
+        const dir = Math.hypot(v[0], v[1]) || 1;
+        const perp: [number, number] = [-v[1] / dir, v[0] / dir];
+        const sign = i === 0 ? 1 : -1;
+        label(view, `λ${i + 1}=${fmt(lam)}`,
+              [v[0] * lam + perp[0] * 0.2 * sign,
+               v[1] * lam + perp[1] * 0.2 * sign + 0.05], c.accent,
+              lam < 0 ? 'right' : 'left');
+      }
+    }
+
+    // The draggable input vector and its image.
+    const u: Vec2 = [Math.cos(angle), Math.sin(angle)];
+    const v = apply2(M, u);
+    drawArrow(view, [0, 0], u, c.series[0], 2.5);
+    drawArrow(view, [0, 0], v, c.ink, 2.5);
+    label(view, 'u', [u[0] * 1.14, u[1] * 1.14], c.series[0],
+          u[0] < 0 ? 'right' : 'left');
+    // Perpendicular offset on the opposite side from the lambda labels, so the
+    // two cannot land on the same point when u sits on an eigenvector.
+    const vLen = Math.hypot(v[0], v[1]) || 1;
+    label(view, 'v = Mu',
+          [v[0] + (v[1] / vLen) * 0.22, v[1] - (v[0] / vLen) * 0.22],
+          c.ink, v[0] < 0 ? 'right' : 'left');
+
+    // Angle between u and v. On an eigenvector this is 0 degrees for a
+    // POSITIVE eigenvalue and 180 degrees for a negative one -- M reverses the
+    // vector but still does not rotate it off its line. An earlier version
+    // tested only for 0 and so silently missed every negative eigenvector,
+    // while telling the student to "drive this to 0", which is impossible
+    // there. Caught by an external correctness review.
+    const dot = (u[0] * v[0] + u[1] * v[1]) / (Math.hypot(...v) || 1);
+    const turn = Math.acos(Math.max(-1, Math.min(1, dot))) * 180 / Math.PI;
+    const onEigenvector = turn < 1.5 || turn > 178.5;
+    const flipped = turn > 178.5;
+
+    const det = M[0] * M[3] - M[1] * M[2];
+    const trace = M[0] + M[3];
+
+    readout.innerHTML = eig.real
+      ? `<table>
+           <tr><th>λ₁</th><td>${fmt(eig.lambda[0])}</td>
+               <th>eigenvector</th><td>[${fmt(eig.vectors[0][0])}, ${fmt(eig.vectors[0][1])}]</td></tr>
+           <tr><th>λ₂</th><td>${fmt(eig.lambda[1])}</td>
+               <th>eigenvector</th><td>[${fmt(eig.vectors[1][0])}, ${fmt(eig.vectors[1][1])}]</td></tr>
+           <tr><th>trace</th><td>${fmt(trace)}</td><th>det</th><td>${fmt(det)}</td></tr>
+           <tr><th>∠(u, v)</th><td colspan="3">${turn.toFixed(1)}° &mdash;
+               ${onEigenvector
+                 ? `<b>u is on an eigenvector: M does not rotate it off its line</b>`
+                   + (flipped
+                      ? ' — the eigenvalue is negative, so v points the opposite'
+                        + ' way along that same line (180°, not 0°).'
+                      : '')
+                 : 'rotate u onto a dashed line: the angle goes to 0° for a'
+                   + ' positive eigenvalue, 180° for a negative one'}</td></tr>
+           ${eig.isotropic ? `<tr><td colspan="4"><b>M is a multiple of the
+               identity.</b> Every direction is an eigenvector — the two drawn
+               here are just one convenient basis, and the "ellipse" is a
+               circle.</td></tr>` : ''}
+           ${eig.defective ? `<tr><td colspan="4"><b>Repeated eigenvalue with
+               only one eigenvector direction</b> (a defective matrix). There is
+               genuinely no second independent eigenvector, so only one line is
+               meaningful.</td></tr>` : ''}
+         </table>`
+      : `<table>
+           <tr><th>λ</th><td colspan="3">${fmt(eig.lambda[0])} ± ${fmt(eig.im)}i
+               &mdash; <b>complex pair: no real eigenvector</b></td></tr>
+           <tr><th>trace</th><td>${fmt(trace)}</td><th>det</th><td>${fmt(det)}</td></tr>
+           <tr><td colspan="4">Every direction gets rotated, so no real line is left
+               unturned. The ellipse axes still exist &mdash; turn on <b>MMᵀ</b> to see them.</td></tr>
+         </table>`;
+  }
+
+  function pointerAngle(event: PointerEvent) {
+    const rect = canvas.getBoundingClientRect();
+    const view = makeView(canvas, { xMin: -1, xMax: 1, yMin: -1, yMax: 1, equalAspect: true });
+    const wx = view.invX(event.clientX - rect.left);
+    const wy = view.invY(event.clientY - rect.top);
+    return Math.atan2(wy, wx);
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    canvas.setPointerCapture(e.pointerId);
+    angle = pointerAngle(e);
+    draw();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    angle = pointerAngle(e);
+    draw();
+  });
+  canvas.addEventListener('pointerup', () => { dragging = false; });
+  canvas.addEventListener('pointercancel', () => { dragging = false; });
+
+  inputs.forEach((el) => el.addEventListener('input', draw));
+  [showEig, showSvd, showIter].forEach((el) => el.addEventListener('change', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const values = btn.dataset.preset!.split(',');
+      inputs.forEach((el, i) => { el.value = values[i]; });
+      draw();
+    });
+  });
+
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  draw();
+</script>

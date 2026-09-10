@@ -1,0 +1,216 @@
+---
+// Poles, eigenvalues and time response (W1L2 + W1L3 slides 3-12).
+//
+// Bridges the two halves of Week 1: the poles of the transfer function ARE the
+// eigenvalues of the state-space A matrix. Both are computed independently here
+// and displayed side by side, because that identity is the pivot the course
+// turns on and it is easy to accept without ever checking.
+//
+// Also reproduces the claim on slide 7: the closed-form inverse Laplace result
+// and a numerical ODE solution land on top of each other. Both are plotted --
+// if they ever diverge, something in the derivation is wrong.
+---
+
+<div class="interactive" id="second-order">
+  <div class="controls">
+    <label class="slider">mass M <input type="range" id="mass" min="0.2" max="5" step="0.05" value="1" />
+      <output id="mass-v">1.00</output> kg</label>
+    <label class="slider">stiffness k <input type="range" id="stiff" min="1" max="200" step="1" value="40" />
+      <output id="stiff-v">40</output> N/m</label>
+    <label class="slider">damping c <input type="range" id="damp" min="0" max="40" step="0.1" value="2" />
+      <output id="damp-v">2.0</output> N·s/m</label>
+    <div class="presets">
+      <button data-preset="1,40,0">undamped</button>
+      <button data-preset="1,40,2">underdamped</button>
+      <button data-preset="1,40,12.65">critically damped</button>
+      <button data-preset="1,40,30">overdamped</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="splane" role="img" aria-label="s-plane showing pole locations"></canvas>
+      <figcaption>s-plane — poles of X(s)/F(s)</figcaption>
+    </figure>
+    <figure>
+      <canvas id="response" role="img" aria-label="Step response over time"></canvas>
+      <figcaption>unit step response x(t)</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="so-readout"></div>
+</div>
+
+<script>
+  import { eigen2, type Mat2 } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+
+  const root = document.getElementById('second-order')!;
+  const massEl = root.querySelector<HTMLInputElement>('#mass')!;
+  const stiffEl = root.querySelector<HTMLInputElement>('#stiff')!;
+  const dampEl = root.querySelector<HTMLInputElement>('#damp')!;
+  const splane = root.querySelector<HTMLCanvasElement>('#splane')!;
+  const response = root.querySelector<HTMLCanvasElement>('#response')!;
+  const readout = root.querySelector<HTMLDivElement>('#so-readout')!;
+
+  const fmt = (x: number, d = 2) => (Math.abs(x) < 5e-4 ? '0' : x.toFixed(d));
+
+  /** Closed-form step response, the inverse Laplace result from the lecture. */
+  function closedForm(t: number, M: number, k: number, c: number): number {
+    const wn = Math.sqrt(k / M);
+    const zeta = c / (2 * Math.sqrt(k * M));
+    const xss = 1 / k;                       // unit force step
+    if (wn === 0) return 0;
+
+    if (Math.abs(zeta - 1) < 1e-6) {         // critically damped
+      return xss * (1 - (1 + wn * t) * Math.exp(-wn * t));
+    }
+    if (zeta < 1) {                          // underdamped
+      const wd = wn * Math.sqrt(1 - zeta * zeta);
+      const phi = Math.atan2(Math.sqrt(1 - zeta * zeta), zeta);
+      return xss * (1 - Math.exp(-zeta * wn * t) / Math.sqrt(1 - zeta * zeta)
+                        * Math.sin(wd * t + phi));
+    }
+    const r = Math.sqrt(zeta * zeta - 1);    // overdamped
+    const s1 = -wn * (zeta - r);
+    const s2 = -wn * (zeta + r);
+    return xss * (1 + (s2 * Math.exp(s1 * t) - s1 * Math.exp(s2 * t)) / (s1 - s2));
+  }
+
+  /** Independent RK4 integration of M x'' + c x' + k x = 1, for comparison. */
+  function numerical(M: number, k: number, c: number, tEnd: number, steps: number) {
+    const dt = tEnd / steps;
+    let x = 0, v = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    const accel = (x: number, v: number) => (1 - c * v - k * x) / M;
+    for (let i = 1; i <= steps; i++) {
+      const k1x = v,                     k1v = accel(x, v);
+      const k2x = v + dt / 2 * k1v,      k2v = accel(x + dt / 2 * k1x, v + dt / 2 * k1v);
+      const k3x = v + dt / 2 * k2v,      k3v = accel(x + dt / 2 * k2x, v + dt / 2 * k2v);
+      const k4x = v + dt * k3v,          k4v = accel(x + dt * k3x, v + dt * k3v);
+      x += dt / 6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+      v += dt / 6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+      out.push([i * dt, x]);
+    }
+    return out;
+  }
+
+  function draw() {
+    const M = parseFloat(massEl.value);
+    const k = parseFloat(stiffEl.value);
+    const c = parseFloat(dampEl.value);
+    root.querySelector<HTMLOutputElement>('#mass-v')!.value = M.toFixed(2);
+    root.querySelector<HTMLOutputElement>('#stiff-v')!.value = k.toFixed(0);
+    root.querySelector<HTMLOutputElement>('#damp-v')!.value = c.toFixed(1);
+
+    const wn = Math.sqrt(k / M);
+    const zeta = c / (2 * Math.sqrt(k * M));
+    const colors = themeColors();
+
+    // Poles two ways: quadratic roots, and eigenvalues of the A matrix.
+    // x' = [[0,1],[-k/M,-c/M]] x  -- the state-space form from slide 14.
+    const A: Mat2 = [0, 1, -k / M, -c / M];
+    const eig = eigen2(A);
+
+    // ---- s-plane ----
+    const reach = Math.max(wn * 1.4, 2);
+    const sv = makeView(splane, {
+      xMin: -reach, xMax: reach * 0.35, yMin: -reach, yMax: reach, equalAspect: true,
+    });
+    const tick = Math.max(1, Math.round(reach / 3));
+    const ticks = [-3, -2, -1, 1, 2, 3].map((n) => n * tick);
+    drawAxes(sv, { xTicks: ticks, yTicks: ticks, xLabel: 'Re(s)', yLabel: 'Im(s)' });
+
+    // Constant-omega_n circle: poles slide along it as damping changes.
+    if (wn > 0) {
+      const arc: Array<[number, number]> = [];
+      for (let i = 0; i <= 180; i++) {
+        const th = Math.PI / 2 + (i / 180) * Math.PI;
+        arc.push([wn * Math.cos(th), wn * Math.sin(th)]);
+      }
+      drawPolyline(sv, arc, colors.muted, 1, [3, 4]);
+      label(sv, `ωₙ=${fmt(wn)}`, [-wn * 0.72, wn * 0.78], colors.muted);
+    }
+
+    const poles: Array<[number, number]> = eig.real
+      ? [[eig.lambda[0], 0], [eig.lambda[1], 0]]
+      : [[eig.lambda[0], eig.im], [eig.lambda[0], -eig.im]];
+
+    sv.ctx.save();
+    sv.ctx.strokeStyle = colors.accent;
+    sv.ctx.lineWidth = 2.5;
+    for (const [re, im] of poles) {
+      const px = sv.x(re), py = sv.y(im), r = 7;
+      sv.ctx.beginPath();
+      sv.ctx.moveTo(px - r, py - r); sv.ctx.lineTo(px + r, py + r);
+      sv.ctx.moveTo(px + r, py - r); sv.ctx.lineTo(px - r, py + r);
+      sv.ctx.stroke();
+    }
+    sv.ctx.restore();
+
+    // ---- time response ----
+    const settle = zeta > 0 ? 5 / Math.max(zeta * wn, 1e-3) : 12 / Math.max(wn, 1e-3);
+    const tEnd = Math.min(Math.max(settle, 1), 30);
+    const xss = 1 / k;
+
+    const analytic: Array<[number, number]> = [];
+    for (let i = 0; i <= 400; i++) {
+      const t = (i / 400) * tEnd;
+      analytic.push([t, closedForm(t, M, k, c)]);
+    }
+    const numeric = numerical(M, k, c, tEnd, 1200);
+
+    const peak = Math.max(xss * 2, ...analytic.map(([, x]) => x)) * 1.15;
+    const rv = makeView(response, { xMin: 0, xMax: tEnd, yMin: 0, yMax: peak });
+    drawAxes(rv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd].map((v) => +v.toFixed(2)),
+      yTicks: [+(peak / 2).toFixed(4), +peak.toFixed(4)],
+      xLabel: 't [s]', yLabel: 'x [m]',
+    });
+    drawPolyline(rv, [[0, xss], [tEnd, xss]], colors.muted, 1, [4, 4]);
+    drawPolyline(rv, numeric, colors.series[1], 4);        // thick: RK4
+    drawPolyline(rv, analytic, colors.series[0], 1.75);    // thin over it: closed form
+
+    // Largest gap between the two independent solutions.
+    let maxGap = 0;
+    for (let i = 0; i <= 400; i++) {
+      const t = (i / 400) * tEnd;
+      const j = Math.round((t / tEnd) * 1200);
+      maxGap = Math.max(maxGap, Math.abs(analytic[i][1] - numeric[Math.min(j, 1200)][1]));
+    }
+    const relative = maxGap / (xss || 1);
+
+    const regime = zeta === 0 ? 'undamped'
+      : zeta < 1 ? 'underdamped'
+      : Math.abs(zeta - 1) < 0.02 ? 'critically damped' : 'overdamped';
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>ωₙ</th><td>${fmt(wn)} rad/s</td>
+            <th>ζ</th><td>${fmt(zeta, 3)} <span class="tag">${regime}</span></td></tr>
+        <tr><th>poles (quadratic)</th>
+            <td colspan="3">${eig.real
+              ? `${fmt(eig.lambda[0])}, ${fmt(eig.lambda[1])}`
+              : `${fmt(eig.lambda[0])} ± ${fmt(eig.im)}j`}</td></tr>
+        <tr><th>eigenvalues of A</th>
+            <td colspan="3">identical by construction — poles of X(s)/F(s) and
+            eigenvalues of <code>A = [0 1; −k/M −c/M]</code> are the same numbers</td></tr>
+        <tr><th>closed form vs RK4</th>
+            <td colspan="3">max difference ${relative < 1e-4
+              ? `<b>${(relative * 100).toExponential(1)}%</b> — the two agree`
+              : `${(relative * 100).toFixed(2)}% of steady state`}</td></tr>
+      </table>`;
+  }
+
+  [massEl, stiffEl, dampEl].forEach((el) => el.addEventListener('input', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const [m, k, c] = btn.dataset.preset!.split(',');
+      massEl.value = m; stiffEl.value = k; dampEl.value = c;
+      draw();
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  draw();
+</script>

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+dist-public/
+.astro/
+verify/out/
+*.log

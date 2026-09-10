@@ -1,0 +1,15 @@
+import { chromium } from 'playwright';
+import path from 'node:path'; import { fileURLToPath } from 'node:url';
+import { serve } from './lib.mjs';
+const DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+const s = await serve(DIST);
+const b = await chromium.launch();
+const ctx = await b.newContext({ viewport: { width: 1100, height: 1200 }, colorScheme: 'light' });
+const p = await ctx.newPage();
+const mode = process.argv[2] ?? '0';
+await p.goto(`${s.origin}/interactives/modal-decomposition/`, { waitUntil: 'networkidle' });
+await p.locator(`input[name="exc"][value="${mode}"]`).check();
+await p.waitForTimeout(900);
+await p.screenshot({ path: `verify/out/spectrum-${mode}.png`, fullPage: true });
+console.log('captured mode', mode);
+await b.close(); await s.close();

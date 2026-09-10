@@ -1,0 +1,280 @@
+---
+// Modal Analysis of Eigenvectors (W1L3, slides 39-51).
+//
+// The lecture's chain: T^-1 A T = D diagonalizes the system, x = Tz turns
+// coupled motion into independent modes, and z = e^(Dt) z0 solves each one on
+// its own. That is four lines of algebra whose consequence -- that a messy
+// coupled motion is a sum of a few simple ones -- is much easier to believe
+// after watching the sum rebuild the motion.
+//
+// Uses the 3-mass spring chain from slide 41.
+---
+
+<div class="interactive" id="modal">
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider">m₁ <input type="range" id="m1" min="0.2" max="4" step="0.05" value="1" /><output id="m1-v">1.0</output></label>
+      <label class="slider">m₂ <input type="range" id="m2" min="0.2" max="4" step="0.05" value="1" /><output id="m2-v">1.0</output></label>
+      <label class="slider">m₃ <input type="range" id="m3" min="0.2" max="4" step="0.05" value="1" /><output id="m3-v">1.0</output></label>
+      <label class="slider">k₁ <input type="range" id="k1" min="1" max="100" step="1" value="30" /><output id="k1-v">30</output></label>
+      <label class="slider">k₂ <input type="range" id="k2" min="1" max="100" step="1" value="30" /><output id="k2-v">30</output></label>
+      <label class="slider">k₃ <input type="range" id="k3" min="1" max="100" step="1" value="30" /><output id="k3-v">30</output></label>
+    </div>
+    <div class="presets">
+      <button data-preset="1,1,1,30,30,30">uniform chain</button>
+      <button data-preset="3,1,1,30,30,30">heavy first mass</button>
+      <button data-preset="1,1,1,90,10,10">stiff first spring</button>
+    </div>
+    <div class="toggles" id="mode-toggle">
+      <span class="mlabel">excite:</span>
+      <label><input type="radio" name="exc" value="0" checked /> mode 1 only</label>
+      <label><input type="radio" name="exc" value="1" /> mode 2 only</label>
+      <label><input type="radio" name="exc" value="2" /> mode 3 only</label>
+      <label><input type="radio" name="exc" value="-1" /> pull mass 3 (all modes)</label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="chain" class="short" role="img" aria-label="Animated three mass spring chain"></canvas>
+      <figcaption>the physical chain — ground, then m₁ m₂ m₃</figcaption>
+    </figure>
+    <figure>
+      <canvas id="modes" class="short" role="img" aria-label="Mode shapes and modal contributions over time"></canvas>
+      <figcaption>modal coordinates z(t) — independent by construction</figcaption>
+    </figure>
+  </div>
+
+  <figure class="spectrum-figure">
+    <canvas id="spectrum" class="short" role="img"
+            aria-label="Modal activation against natural frequency"></canvas>
+    <figcaption>
+      modal activation — how much of the initial condition each mode carries,
+      placed at its own natural frequency
+    </figcaption>
+  </figure>
+
+  <div class="readout" id="modal-readout"></div>
+</div>
+
+<script>
+  import { springModes, solve } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+
+  const root = document.getElementById('modal')!;
+  const ids = ['m1', 'm2', 'm3', 'k1', 'k2', 'k3'];
+  const els = Object.fromEntries(
+    ids.map((id) => [id, root.querySelector<HTMLInputElement>('#' + id)!]));
+  const chain = root.querySelector<HTMLCanvasElement>('#chain')!;
+  const modesCanvas = root.querySelector<HTMLCanvasElement>('#modes')!;
+  const spectrumCanvas = root.querySelector<HTMLCanvasElement>('#spectrum')!;
+  const readout = root.querySelector<HTMLDivElement>('#modal-readout')!;
+
+  let t0 = performance.now();
+  let raf = 0;
+
+  const fmt = (x: number, d = 2) => (Math.abs(x) < 5e-3 ? '0' : x.toFixed(d));
+
+  function state() {
+    const masses = [+els.m1.value, +els.m2.value, +els.m3.value];
+    const springs = [+els.k1.value, +els.k2.value, +els.k3.value];
+    ids.forEach((id) => {
+      const out = root.querySelector<HTMLOutputElement>('#' + id + '-v')!;
+      out.value = id.startsWith('m') ? (+els[id].value).toFixed(1) : (+els[id].value).toFixed(0);
+    });
+    const { omega, shapes } = springModes(masses, springs);
+    const excited = +(root.querySelector<HTMLInputElement>('input[name=exc]:checked')!.value);
+
+    // Initial displacement, decomposed into modal coordinates z0 by solving
+    // x0 = T z0 -- the x = Tz change of basis from slide 40.
+    const x0 = excited >= 0 ? shapes[excited].slice() : [0, 0, 1];
+    const T = [0, 1, 2].map((row) => [0, 1, 2].map((mode) => shapes[mode][row]));
+    const z0 = solve(T, x0);
+    return { masses, springs, omega, shapes, x0, z0, excited };
+  }
+
+  function frame() {
+    const { omega, shapes, x0, z0, excited } = state();
+    const time = (performance.now() - t0) / 1000;
+    const colors = themeColors();
+
+    // Each modal coordinate evolves independently: z_i(t) = z_i(0) cos(w_i t).
+    const z = z0.map((amp, i) => amp * Math.cos(omega[i] * time));
+    // Physical motion is the sum of modal contributions: x = T z.
+    const x = [0, 1, 2].map((row) =>
+      z.reduce((sum, zi, mode) => sum + shapes[mode][row] * zi, 0));
+
+    // ---- physical chain ----
+    const cv = makeView(chain, { xMin: -0.5, xMax: 3.9, yMin: -1.6, yMax: 1.6, pad: 18 });
+    const ctx = cv.ctx;
+    const scale = 0.55;
+    ctx.save();
+    ctx.strokeStyle = colors.muted;
+    ctx.lineWidth = 2;
+    ctx.beginPath();                                  // ground
+    ctx.moveTo(cv.x(-0.35), cv.y(-1.1)); ctx.lineTo(cv.x(-0.35), cv.y(1.1));
+    ctx.stroke();
+
+    const restX = [1, 2, 3];
+    const posX = restX.map((r, i) => r + x[i] * scale);
+    let prev = -0.35;
+    for (let i = 0; i < 3; i++) {
+      // Spring as a zigzag. Segment count scales with the gap so a short
+      // spring does not collapse into a solid block -- the coils keep a
+      // roughly constant density instead.
+      const pts: Array<[number, number]> = [];
+      const gap = Math.max(posX[i] - 0.22 - prev, 0.05);
+      const segs = Math.max(6, Math.round(gap * 18) * 2);
+      for (let s = 0; s <= segs; s++) {
+        const f = s / segs;
+        const px = prev + (posX[i] - 0.22 - prev) * f;
+        const py = s === 0 || s === segs ? 0 : (s % 2 === 0 ? 0.18 : -0.18);
+        pts.push([px, py]);
+      }
+      drawPolyline(cv, pts, colors.muted, 1.5);
+      // mass block
+      const w = 0.44, h = 0.66;
+      ctx.fillStyle = colors.series[i];
+      ctx.globalAlpha = 0.85;
+      ctx.fillRect(cv.x(posX[i] - w / 2), cv.y(h / 2),
+                   w * cv.scaleX, h * cv.scaleY);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#fff';
+      ctx.font = '600 12px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`m${i + 1}`, cv.x(posX[i]), cv.y(0) + 4);
+      // rest-position marker
+      ctx.strokeStyle = colors.grid;
+      ctx.setLineDash([2, 3]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cv.x(restX[i]), cv.y(-0.95)); ctx.lineTo(cv.x(restX[i]), cv.y(0.95));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      prev = posX[i] + 0.22;
+    }
+    ctx.restore();
+
+    // ---- modal coordinates over time ----
+    // Fill the frame from t=0 and only start scrolling once the trace has
+    // reached the right edge. The earlier version used [time-window, time]
+    // from the first frame, so for the first six seconds the plot showed
+    // negative time with the curve squeezed into a sliver at the right.
+    const window = 6;
+    const xMin = time <= window ? 0 : time - window;
+    const xMax = xMin + window;
+    const mv = makeView(modesCanvas, {
+      xMin, xMax, yMin: -1.25, yMax: 1.25,
+    });
+    const tick = (n: number) => +(xMin + (n / 4) * window).toFixed(1);
+    drawAxes(mv, { yTicks: [-1, 1], xTicks: [tick(1), tick(2), tick(3)], xLabel: 't [s]' });
+    for (let mode = 0; mode < 3; mode++) {
+      if (Math.abs(z0[mode]) < 1e-9) continue;
+      // Draw the whole visible window, not just up to "now". z(t) is known in
+      // closed form, so there is nothing to wait for, and a plot that fills in
+      // over six seconds just looks broken on arrival. A playhead below marks
+      // where the animated chain currently is.
+      const trace: Array<[number, number]> = [];
+      for (let i = 0; i <= 300; i++) {
+        const tt = xMin + (i / 300) * window;
+        trace.push([tt, z0[mode] * Math.cos(omega[mode] * tt)]);
+      }
+      drawPolyline(mv, trace, colors.series[mode], 2);
+      const tagAt = xMin + window * 0.03;
+      label(mv, `z${mode + 1}`, [tagAt, z0[mode] * Math.cos(omega[mode] * tagAt)],
+            colors.series[mode], 'left');
+    }
+
+    // Playhead: ties the animated chain to a position on the traces.
+    const head = Math.min(time, xMax);
+    drawPolyline(mv, [[head, -1.25], [head, 1.25]], colors.ink, 1.25, [3, 3]);
+
+    // ---- modal activation against frequency -----------------------------
+    // A free-vibration system driven only by initial conditions has a line
+    // spectrum: energy sits at the natural frequencies and nowhere else. The
+    // height of each line is how much of x(0) that mode carries, which is
+    // exactly |z_i(0)|. Releasing on a mode shape gives one line; pulling a
+    // single mass gives three, and the difference is the point of the tool.
+    const activation = z0.map(Math.abs);
+    const peak = Math.max(...activation, 1e-9);
+    const fMax = Math.max(...omega) / (2 * Math.PI) * 1.35;
+    const sv = makeView(spectrumCanvas, {
+      xMin: 0, xMax: fMax, yMin: 0, yMax: 1.18,
+    });
+    // Tick exactly at the natural frequencies. An evenly spaced axis puts ticks
+    // where nothing happens and collides with the stem labels; the modal
+    // frequencies are the only ones that mean anything in a line spectrum.
+    drawAxes(sv, {
+      xTicks: omega.map((w) => +(w / (2 * Math.PI)).toFixed(2)),
+      yTicks: [0.5, 1],
+      xLabel: 'frequency [Hz]',
+      yLabel: 'participation',
+    });
+
+    for (let mode = 0; mode < 3; mode++) {
+      const f = omega[mode] / (2 * Math.PI);
+      const height = activation[mode] / peak;
+      // Stem plus marker: a line spectrum, not a continuous curve, because the
+      // free response genuinely contains only these frequencies.
+      drawPolyline(sv, [[f, 0], [f, height]], colors.series[mode],
+                   height > 0.001 ? 3 : 1.5, height > 0.001 ? [] : [2, 3]);
+      if (height > 0.001) {
+        sv.ctx.save();
+        sv.ctx.fillStyle = colors.series[mode];
+        sv.ctx.beginPath();
+        sv.ctx.arc(sv.x(f), sv.y(height), 4, 0, Math.PI * 2);
+        sv.ctx.fill();
+        sv.ctx.restore();
+      }
+      const share = activation.reduce((a, b) => a + b, 0);
+      const pct = share > 0 ? (activation[mode] / share) * 100 : 0;
+      // Percentage only. The stem colour identifies the mode and the axis tick
+      // gives its frequency, so a "mode N" caption here just collides with the
+      // tick label directly beneath it.
+      label(sv, `${pct < 0.05 ? '0' : pct.toFixed(0)}%`,
+            [f, Math.max(height, 0.04) + 0.10], colors.series[mode], 'center');
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th></th><th>ωₙ [rad/s]</th><th>f [Hz]</th><th>mode shape [m₁ m₂ m₃]</th><th>z(0)</th></tr>
+        ${[0, 1, 2].map((i) => `
+          <tr>
+            <th style="color:${colors.series[i]}">mode ${i + 1}</th>
+            <td>${fmt(omega[i])}</td>
+            <td>${fmt(omega[i] / (2 * Math.PI))}</td>
+            <td>[${shapes[i].map((v) => fmt(v)).join(', ')}]</td>
+            <td>${fmt(z0[i])}</td>
+          </tr>`).join('')}
+      </table>
+      <p class="note">${excited >= 0
+        ? `Released exactly on mode ${excited + 1}'s shape, so only z${excited + 1} is
+           non-zero and every mass moves at one frequency — the chain is coupled,
+           but this motion is not.`
+        : `Released by pulling m₃ alone. That initial shape is not a mode, so all
+           three modal coordinates are excited and the masses move at a mixture of
+           frequencies. The sum of the three z traces rebuilds the motion.`}</p>`;
+
+    raf = requestAnimationFrame(frame);
+  }
+
+  function restart() { t0 = performance.now(); }
+  ids.forEach((id) => els[id].addEventListener('input', restart));
+  root.querySelectorAll<HTMLInputElement>('input[name=exc]')
+      .forEach((el) => el.addEventListener('change', restart));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const values = btn.dataset.preset!.split(',');
+      ids.forEach((id, i) => { els[id].value = values[i]; });
+      restart();
+    });
+  });
+
+  // Stop animating when the page is not visible; this runs at 60fps otherwise.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { cancelAnimationFrame(raf); }
+    else { t0 = performance.now(); raf = requestAnimationFrame(frame); }
+  });
+
+  raf = requestAnimationFrame(frame);
+</script>

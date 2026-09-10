@@ -1,0 +1,39 @@
+---
+// Shown on every page. Classmates are being graded on this material, so the
+// page should be honest about what it is, what it is not, and how much to
+// trust it -- without needing anyone to go looking for that information.
+const repo = 'https://github.com/lpurdy01/ece732-interactives';
+---
+
+<footer class="provenance">
+  <h2>About these tools</h2>
+
+  <p>
+    Study aids for <b>ECE/ME 732 — Dynamics of Controlled Systems</b>, built by
+    Levi Purdy. <b>Not official course material</b>: not produced, reviewed, or
+    endorsed by the instructor or the University. They contain no course
+    handouts, lecture material, or homework solutions — only general
+    control-systems concepts, written from scratch.
+  </p>
+
+  <p>
+    <b>Built with AI assistance</b> (Claude), and verified rather than trusted.
+    The numerics are checked against known closed-form results before use —
+    eigenvalues of known matrices, a rotation correctly reported as a complex
+    pair, and the three-mass chain's natural frequencies against
+    2·√(k/m)·sin((2j−1)π/14). A browser test suite drives every control and
+    asserts the displayed numbers against independently computed values, and a
+    second AI model reviews the mathematics for errors.
+  </p>
+
+  <p>
+    That process has caught real mistakes in these very tools — including a
+    claim that a vector on an eigenvector is never rotated, which is false when
+    the eigenvalue is negative. <b>If something here disagrees with the lecture,
+    the lecture is right.</b> Please tell me if you find an error.
+  </p>
+
+  <p class="provenance-links">
+    <a href={repo}>Source and verification harness</a>
+  </p>
+</footer>

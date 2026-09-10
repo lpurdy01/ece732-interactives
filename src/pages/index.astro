@@ -1,0 +1,65 @@
+---
+import { getCollection } from 'astro:content';
+import { visibleConcepts } from '../lib/visibility';
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { href } from '../lib/href';
+
+const all = await getCollection('concepts');
+const concepts = visibleConcepts(all);
+const verified = concepts.filter((c) => c.data.status === 'student-verified').length;
+const isPublic = import.meta.env.PUBLIC_ONLY === true;
+---
+
+<BaseLayout title="ECE/ME 732 — Dynamics of Controlled Systems">
+  <h1>Dynamics of Controlled Systems</h1>
+  <p class="lede">
+    A study system for ECE/ME 732: linked concept notes and interactive tools for
+    building intuition about state feedback, eigenvalue migration, decoupling,
+    and observers.
+  </p>
+
+  {!isPublic && (
+    <p class="private-banner">
+      Private build — includes notes derived from course materials. Do not publish
+      this output. The public build is <code>npm run build:public</code>.
+    </p>
+  )}
+
+  <h2>Concept notes</h2>
+  <p>
+    {verified} of {concepts.length} notes verified.
+    Unverified notes are agent-drafted teaching material, not evidence of
+    understanding.
+  </p>
+
+  {concepts.length === 0 ? (
+    <p class="empty">
+      No notes yet. Copy <code>knowledge/TEMPLATE.md</code> into
+      <code>knowledge/concepts/</code> to start one.
+    </p>
+  ) : (
+    <ul class="note-list">
+      {concepts.map((concept) => (
+        <li>
+          <a href={href(`/concepts/${concept.data.id}/`)}>{concept.data.title}</a>
+          {concept.data.status === 'agent-drafted' && (
+            <span class="badge unverified" title="Agent-drafted; not yet verified">
+              unverified
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  )}
+
+  <h2>Interactive tools</h2>
+  <p>
+    Written from general control-systems knowledge, so they carry no course
+    material and are publishable. <a href={href("/interactives/")}>Week 1 interactives →</a>
+  </p>
+  <ul class="note-list">
+    <li><a href={href("/interactives/eigenvector-geometry/")}>Geometric View of Eigenvectors</a></li>
+    <li><a href={href("/interactives/modal-decomposition/")}>Modal Analysis of Eigenvectors</a></li>
+    <li><a href={href("/interactives/second-order-response/")}>Poles, Eigenvalues and Response</a></li>
+  </ul>
+</BaseLayout>

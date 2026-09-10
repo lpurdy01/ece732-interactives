@@ -1,0 +1,59 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+
+const items = [
+  {
+    href: href('/interactives/eigenvector-geometry/'),
+    title: 'Geometric View of Eigenvectors',
+    lecture: 'W1L3, slides 28–38',
+    blurb: 'Map a circle of input vectors through M and watch the ellipse come out. ' +
+           'Eigenvectors of M are the directions left unrotated — and, as the lecture ' +
+           'is careful to point out, they are not the axes of the ellipse.',
+  },
+  {
+    href: href('/interactives/modal-decomposition/'),
+    title: 'Modal Analysis of Eigenvectors',
+    lecture: 'W1L3, slides 39–51',
+    blurb: 'The three-mass spring chain. Release it on a mode shape and every mass ' +
+           'moves at one frequency; pull one mass instead and all three modes light up.',
+  },
+  {
+    href: href('/interactives/second-order-response/'),
+    title: 'Poles, Eigenvalues and Response',
+    lecture: 'W1L2 + W1L3, slides 3–12',
+    blurb: 'Mass-spring-damper. Move ζ and ωₙ, watch the poles slide and the step ' +
+           'response change shape — and see that the poles are the eigenvalues of A.',
+  },
+];
+---
+
+<BaseLayout title="Week 1 Interactives — ECE/ME 732">
+  <h1>Week 1 Interactives</h1>
+  <p class="lede">
+    Tools for building intuition about the Week 1 material: Laplace and second-order
+    response, and the geometric and modal views of eigenvectors. Everything runs in
+    the browser — the numerics are in <code>src/lib/linalg.ts</code> and are checked
+    against known closed-form results.
+  </p>
+
+  <ul class="card-list">
+    {items.map((item) => (
+      <li>
+        <a href={item.href}><h2>{item.title}</h2></a>
+        <p class="lecture-ref">{item.lecture}</p>
+        <p>{item.blurb}</p>
+      </li>
+    ))}
+  </ul>
+
+  <h2>Why these three</h2>
+  <p>
+    Week 1 sets up one identity the rest of the course leans on: the poles of a
+    transfer function are the eigenvalues of the state-space <code>A</code> matrix,
+    and the eigenvectors say what shape of motion each one belongs to. The three
+    tools approach that from the two directions the lecture uses — geometric
+    (what does the matrix <em>do</em> to a vector) and modal (what independent
+    motions is a coupled system made of) — and then join them on the s-plane.
+  </p>
+</BaseLayout>

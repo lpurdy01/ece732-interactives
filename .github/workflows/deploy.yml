@@ -1,0 +1,52 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      # The numerics are checked against known closed-form results, and the
+      # interactives are driven in a real browser, before anything deploys.
+      # A tool that teaches something false is worse than a broken link.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: node verify/verify-interactives.mjs
+
+      - name: Build for Pages
+        env:
+          PUBLIC_BASE: /ece732-interactives
+          PUBLIC_SITE: https://lpurdy01.github.io
+        run: npm run build:public
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

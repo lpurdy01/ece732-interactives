@@ -1,0 +1,42 @@
+---
+import { getCollection } from 'astro:content';
+import { visibleConcepts } from '../../lib/visibility';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+
+export async function getStaticPaths() {
+  const all = await getCollection('concepts');
+  // The public build must not emit a page for a private note, so the filter
+  // happens here at route-generation time rather than in the template.
+  return visibleConcepts(all).map((entry) => ({
+    params: { id: entry.data.id },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await entry.render();
+---
+
+<BaseLayout title={entry.data.title}>
+  <article>
+    <h1>{entry.data.title}</h1>
+    {entry.data.status === 'agent-drafted' && (
+      <p class="private-banner">
+        Agent-drafted and not yet verified. Read it critically, correct what is
+        wrong, then set <code>status: student-verified</code>.
+      </p>
+    )}
+    <Content />
+    {entry.data.related.length > 0 && (
+      <>
+        <h2>Related</h2>
+        <ul>
+          {entry.data.related.map((id) => (
+            <li><a href={href(`/concepts/${id}/`)}>{id}</a></li>
+          ))}
+        </ul>
+      </>
+    )}
+  </article>
+</BaseLayout>
