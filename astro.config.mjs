@@ -2,6 +2,10 @@ import { defineConfig } from 'astro/config';
 import mdx from '@astrojs/mdx';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import { remarkWikilink } from './src/lib/remark-wikilink.mjs';
+import { fileURLToPath } from 'node:url';
+
+const notesDir = fileURLToPath(new URL('./src/content/concepts', import.meta.url));
 
 // PUBLIC_ONLY=1 builds the publishable split: interactive tools and notes
 // written from general knowledge, with everything derived from the
@@ -15,7 +19,7 @@ export default defineConfig({
   base,
   integrations: [mdx()],
   markdown: {
-    remarkPlugins: [remarkMath],
+    remarkPlugins: [remarkMath, [remarkWikilink, { notesDir, base }]],
     rehypePlugins: [rehypeKatex],
   },
   vite: {

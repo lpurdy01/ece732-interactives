@@ -25,6 +25,12 @@ const isPublic = import.meta.env.PUBLIC_ONLY === true;
     </p>
   )}
 
+  {/* On the public build an empty notes list is not an empty state to explain --
+      it means no note has been cleared for publication yet. Showing a heading
+      plus private-repo instructions there is both confusing and a small leak of
+      how the workspace is laid out. */}
+  {(concepts.length > 0 || !isPublic) && (
+  <>
   <h2>Concept notes</h2>
   <p>
     {verified} of {concepts.length} notes verified.
@@ -34,8 +40,8 @@ const isPublic = import.meta.env.PUBLIC_ONLY === true;
 
   {concepts.length === 0 ? (
     <p class="empty">
-      No notes yet. Copy <code>knowledge/TEMPLATE.md</code> into
-      <code>knowledge/concepts/</code> to start one.
+      No notes published yet. Notes live in <code>knowledge/concepts/</code>
+      and appear here once marked <code>visibility: public</code>.
     </p>
   ) : (
     <ul class="note-list">
@@ -50,6 +56,8 @@ const isPublic = import.meta.env.PUBLIC_ONLY === true;
         </li>
       ))}
     </ul>
+  )}
+  </>
   )}
 
   <h2>Interactive tools</h2>

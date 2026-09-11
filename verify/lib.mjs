@@ -164,6 +164,14 @@ export class Report {
   constructor() { this.results = []; }
 
   check(name, ok, detail = '') {
+    // Argument order is (name, ok). Passing them the other way round makes
+    // `ok` a non-empty string -- always truthy -- so the check can never fail.
+    // That happened here: 54 always-green note checks hid a real rendering bug.
+    if (typeof name !== 'string') {
+      throw new TypeError(
+        `Report.check(name, ok, detail): name must be a string, got ${typeof name}. `
+        + 'The arguments are probably swapped.');
+    }
     this.results.push({ name, ok: !!ok, detail });
     return ok;
   }

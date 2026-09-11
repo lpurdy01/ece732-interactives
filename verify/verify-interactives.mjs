@@ -281,6 +281,61 @@ async function checkModal(page, origin, report) {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Concept notes: catch the silent rendering failures.
+ *
+ * A malformed display-math block does not fail the build. KaTeX renders a red
+ * error and remark emits every following line as raw markdown, so the page
+ * still builds, still looks like a page, and is missing half its content. That
+ * happened to five of nine notes and nothing reported it.
+ */
+async function checkNotes(browser, origin, report, noteIds) {
+  if (noteIds.length === 0) {
+    report.check('notes: none published', true, 'nothing to check');
+    return;
+  }
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+  for (const id of noteIds) {
+    const page = await ctx.newPage();
+    const errors = watchErrors(page);
+    await page.goto(`${origin}/concepts/${id}/`, { waitUntil: 'networkidle' });
+
+    const state = await page.evaluate(() => {
+      const article = document.querySelector('article');
+      const html = article ? article.innerHTML : '';
+      const text = article ? article.innerText : '';
+      // textContent sees content innerText hides; raw markdown can land in both.
+      const textAll = article ? article.textContent : '';
+      return {
+        // KaTeX marks a failed expression with .katex-error. Do NOT look for
+        // the inline colour: the browser re-serialises style="color:#cc0000"
+        // as rgb(204, 0, 0) in innerHTML, so a hex match silently never fires.
+        katexErrors: article ? article.querySelectorAll('.katex-error').length : 1,
+        literalWikilinks: (textAll.match(/\[\[[^\]]+\]\]/g) || []).length,
+        rawMath: (textAll.match(/\$\$/g) || []).length,
+        rawEmphasis: (text.match(/(^|\s)\*[A-Za-z][^*]*\*/g) || []).length,
+        wikilinks: document.querySelectorAll('a.wikilink').length,
+        words: text.split(/\s+/).filter(Boolean).length,
+        katexRendered: document.querySelectorAll('.katex').length,
+      };
+    });
+
+    report.check(`note ${id}: no KaTeX render errors`, state.katexErrors === 0,
+                 `${state.katexErrors} red error span(s)`);
+    report.check(`note ${id}: wikilinks resolved`, state.literalWikilinks === 0,
+                 `${state.literalWikilinks} left as literal [[...]]`);
+    report.check(`note ${id}: no unrendered $$ math`, state.rawMath === 0,
+                 `${state.rawMath} raw delimiter(s) in visible text`);
+    report.check(`note ${id}: no raw markdown leaked`, state.rawEmphasis === 0,
+                 `${state.rawEmphasis} unrendered *emphasis* span(s)`);
+    report.check(`note ${id}: has substantive content`, state.words > 120,
+                 `${state.words} words, ${state.katexRendered} rendered formulas`);
+    report.check(`note ${id}: no console errors`, errors.length === 0, errors.join(' | '));
+    await page.close();
+  }
+  await ctx.close();
+}
+
 async function checkResponsiveAndThemes(browser, origin, report) {
   const pages = [
     '/interactives/',
@@ -340,6 +395,14 @@ async function main() {
       await page.close();
     }
     await ctx.close();
+
+    // Concept notes only exist in the private build; skip quietly if absent.
+    const noteIds = fs.existsSync(path.join(DIST, 'concepts'))
+      ? fs.readdirSync(path.join(DIST, 'concepts'), { withFileTypes: true })
+          .filter((d) => d.isDirectory()).map((d) => d.name)
+      : [];
+    await checkNotes(browser, server.origin, report, noteIds);
+
     await checkResponsiveAndThemes(browser, server.origin, report);
   } finally {
     await browser.close();

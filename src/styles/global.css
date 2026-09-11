@@ -230,3 +230,13 @@ a { color: var(--accent); }
 .provenance p { margin: 0 0 0.6rem; line-height: 1.55; }
 .provenance b { color: var(--ink); }
 .provenance-links { margin-top: 0.8rem; }
+
+/* Wikilinks between concept notes. A link to a note that does not exist yet is
+   a deliberate marker, not an error, so it is styled as a visible gap rather
+   than hidden or removed. */
+.wikilink { text-decoration-style: solid; }
+.wikilink-missing {
+  color: var(--muted);
+  text-decoration: underline dashed;
+  cursor: help;
+}
