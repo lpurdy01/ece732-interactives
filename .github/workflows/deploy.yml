@@ -28,9 +28,11 @@ jobs:
       # The numerics are checked against known closed-form results, and the
       # interactives are driven in a real browser, before anything deploys.
       # A tool that teaches something false is worse than a broken link.
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox
+      - run: node verify/verify-diagram-problems.mjs
       - run: npm run build
       - run: node verify/verify-interactives.mjs
+      - run: node verify/verify-sweep.mjs chromium firefox
 
       - name: Build for Pages
         env:

@@ -1,0 +1,343 @@
+---
+// Operating-point linearization.
+//
+// Part 1: a Taylor series about a chosen operating point, term by term, with
+// the band of x over which the truncated series stays within a tolerance. The
+// point is that "linear model" is a claim about a neighbourhood, and the size
+// of that neighbourhood depends on where you are on the curve.
+//
+// Part 2: the same idea inside a dynamic system. A pendulum held at an angle by
+// a steady motor torque gets a step change in torque; the nonlinear model and
+// its operating-point linearization are integrated side by side. Small steps
+// agree, large steps do not, and past a certain step there is no equilibrium
+// at all -- something the linear model cannot say.
+---
+
+<div class="interactive" id="op-linear">
+  <h3 class="op-title">1 · Taylor series about an operating point</h3>
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider">function
+        <select id="op-fn">
+          <option value="cos">cos x (x in degrees)</option>
+          <option value="sin">sin x (x in degrees)</option>
+          <option value="sqrt">√x</option>
+          <option value="square">x²</option>
+        </select>
+      </label>
+      <label class="slider">order N <input type="range" id="op-order" min="0" max="5" step="1" value="1" />
+        <output id="op-order-v"></output></label>
+    </div>
+    <div class="param-grid">
+      <label class="slider">x<sub>op</sub> <input type="range" id="op-x" min="0" max="720" step="1" value="60" />
+        <output id="op-x-v"></output></label>
+      <label class="slider">tolerance <input type="range" id="op-tol" min="0.5" max="20" step="0.5" value="5" />
+        <output id="op-tol-v"></output> % of scale</label>
+    </div>
+  </div>
+  <canvas id="op-taylor" role="img" aria-label="Function and its Taylor approximation"></canvas>
+  <div class="readout" id="op-taylor-readout"></div>
+
+  <h3 class="op-title">2 · Nonlinear vs linearized: a pendulum held at θ<sub>op</sub></h3>
+  <p class="hint">
+    A 1 kg point mass on a massless 1 m rod (so m·g·ℓ = 9.81 N·m and J = m·ℓ² = 1 kg·m²),
+    with viscous friction b at the pivot. A steady torque holds it at θ<sub>op</sub>; at t = 0 the torque steps by ΔT.
+  </p>
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider">θ<sub>op</sub> <input type="range" id="pd-theta" min="-170" max="170" step="1" value="30" />
+        <output id="pd-theta-v"></output>°</label>
+      <label class="slider">ΔT <input type="range" id="pd-dt" min="-80" max="80" step="1" value="10" />
+        <output id="pd-dt-v"></output>% mgℓ</label>
+      <label class="slider">b <input type="range" id="pd-b" min="0.2" max="4" step="0.1" value="1" />
+        <output id="pd-b-v"></output> N·m·s</label>
+    </div>
+    <div class="presets">
+      <button type="button" data-pd="30,5,1">small step</button>
+      <button type="button" data-pd="30,40,1">large step</button>
+      <button type="button" data-pd="60,60,1">no equilibrium</button>
+      <button type="button" data-pd="0,10,1">hanging straight down</button>
+      <button type="button" data-pd="150,2,1">inverted</button>
+    </div>
+  </div>
+  <canvas id="op-pend" role="img" aria-label="Angle deviation over time, nonlinear and linearized"></canvas>
+  <div class="readout" id="op-pend-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, themeColors } from '../lib/plot';
+
+  const root = document.getElementById('op-linear')!;
+  const q = <T extends HTMLElement>(s: string) => root.querySelector<T>(s)!;
+  const DEG = Math.PI / 180;
+  const fmt = (x: number, d = 3) => (Math.abs(x) < 0.5 * 10 ** -d ? (0).toFixed(d) : x.toFixed(d));
+
+  /* ------------------------------------------------------------------ */
+  /* Part 1: Taylor series                                               */
+  /* ------------------------------------------------------------------ */
+
+  interface Fn {
+    label: string;
+    domain: [number, number];
+    unit: string;
+    scale: number;               // tolerance is a percentage of this
+    toArg: (x: number) => number; // slider units -> argument of f
+    /** n-th derivative of f with respect to its argument. */
+    d: (n: number, a: number) => number;
+    defaultOp: number;
+    step: number;
+  }
+
+  const fns: Record<string, Fn> = {
+    cos: {
+      label: 'cos', domain: [0, 720], unit: '°', scale: 2, toArg: (x) => x * DEG, defaultOp: 60, step: 1,
+      d: (n, a) => Math.cos(a + (n * Math.PI) / 2),
+    },
+    sin: {
+      label: 'sin', domain: [0, 720], unit: '°', scale: 2, toArg: (x) => x * DEG, defaultOp: 60, step: 1,
+      d: (n, a) => Math.sin(a + (n * Math.PI) / 2),
+    },
+    sqrt: {
+      label: '√', domain: [0, 4], unit: '', scale: 2, toArg: (x) => x, defaultOp: 1, step: 0.01,
+      d: (n, a) => {
+        let c = 1;
+        for (let k = 0; k < n; k++) c *= 0.5 - k;
+        return c * Math.pow(a, 0.5 - n);
+      },
+    },
+    square: {
+      label: 'x²', domain: [-3, 3], unit: '', scale: 9, toArg: (x) => x, defaultOp: 1, step: 0.01,
+      d: (n, a) => (n === 0 ? a * a : n === 1 ? 2 * a : n === 2 ? 2 : 0),
+    },
+  };
+
+  const factorial = (n: number) => (n <= 1 ? 1 : n * factorial(n - 1));
+
+  function coefficients(fn: Fn, xop: number, order: number) {
+    const a = fn.toArg(xop);
+    return Array.from({ length: order + 1 }, (_, n) => fn.d(n, a) / factorial(n));
+  }
+
+  /** Taylor polynomial value; the power series is in the ARGUMENT (radians for trig). */
+  function taylor(fn: Fn, c: number[], xop: number, x: number) {
+    const dx = fn.toArg(x) - fn.toArg(xop);
+    let sum = 0, p = 1;
+    for (const cn of c) { sum += cn * p; p *= dx; }
+    return sum;
+  }
+
+  /** Widest interval around x_op, within the domain, where |error| <= tol. */
+  function validInterval(fn: Fn, c: number[], xop: number, tol: number) {
+    const [lo, hi] = fn.domain;
+    const h = (hi - lo) / 4000;
+    const ok = (x: number) => Math.abs(fn.d(0, fn.toArg(x)) - taylor(fn, c, xop, x)) <= tol;
+    let left = xop, right = xop;
+    while (left - h >= lo && ok(left - h)) left -= h;
+    while (right + h <= hi && ok(right + h)) right += h;
+    return [left, right];
+  }
+
+  let lastFn = '';
+  function drawTaylor() {
+    const key = q<HTMLSelectElement>('#op-fn').value;
+    const fn = fns[key];
+    const xEl = q<HTMLInputElement>('#op-x');
+    if (key !== lastFn) {
+      xEl.min = String(key === 'sqrt' ? 0.05 : fn.domain[0]);
+      xEl.max = String(fn.domain[1]);
+      xEl.step = String(fn.step);
+      if (lastFn) xEl.value = String(fn.defaultOp);
+      lastFn = key;
+    }
+    const xop = parseFloat(xEl.value);
+    const order = parseInt(q<HTMLInputElement>('#op-order').value, 10);
+    const tolPct = parseFloat(q<HTMLInputElement>('#op-tol').value);
+    const tol = (tolPct / 100) * fn.scale;
+    q<HTMLOutputElement>('#op-x-v').value = `${fn.step >= 1 ? xop.toFixed(0) : xop.toFixed(2)}${fn.unit}`;
+    q<HTMLOutputElement>('#op-order-v').value = String(order);
+    q<HTMLOutputElement>('#op-tol-v').value = tolPct.toFixed(1);
+
+    const colors = themeColors();
+    const c = coefficients(fn, xop, order);
+    const [lo, hi] = fn.domain;
+    const samples = 500;
+    const truth: Array<[number, number]> = [];
+    const approx: Array<[number, number]> = [];
+    let yMin = Infinity, yMax = -Infinity;
+    for (let i = 0; i <= samples; i++) {
+      const x = lo + (hi - lo) * (i / samples);
+      const y = fn.d(0, fn.toArg(Math.max(x, key === 'sqrt' ? 0 : x)));
+      truth.push([x, y]);
+      yMin = Math.min(yMin, y); yMax = Math.max(yMax, y);
+    }
+    const pad = (yMax - yMin) * 0.35 || 1;
+    for (let i = 0; i <= samples; i++) {
+      const x = lo + (hi - lo) * (i / samples);
+      approx.push([x, Math.max(yMin - pad, Math.min(yMax + pad, taylor(fn, c, xop, x)))]);
+    }
+    const [vl, vr] = validInterval(fn, c, xop, tol);
+
+    const view = makeView(q<HTMLCanvasElement>('#op-taylor'), { xMin: lo, xMax: hi, yMin: yMin - pad, yMax: yMax + pad });
+    view.ctx.save();
+    view.ctx.fillStyle = colors.series[2];
+    view.ctx.globalAlpha = 0.14;
+    view.ctx.fillRect(view.x(vl), 0, view.x(vr) - view.x(vl), view.height);
+    view.ctx.restore();
+
+    const xt = key === 'cos' || key === 'sin' ? [120, 240, 360, 480, 600, 720] : key === 'sqrt' ? [1, 2, 3, 4] : [-2, -1, 1, 2, 3];
+    const yt = key === 'square' ? [3, 6, 9] : [-1, 1, 2];
+    drawAxes(view, { xTicks: xt, yTicks: yt, xLabel: key === 'cos' || key === 'sin' ? 'x [°]' : 'x' });
+    drawPolyline(view, truth, colors.series[0], 3);
+    drawPolyline(view, approx, colors.accent, 2, [6, 4]);
+    view.ctx.save();
+    view.ctx.fillStyle = colors.ink;
+    view.ctx.beginPath();
+    view.ctx.arc(view.x(xop), view.y(fn.d(0, fn.toArg(xop))), 5, 0, 2 * Math.PI);
+    view.ctx.fill();
+    view.ctx.restore();
+
+    // Width of the valid band for each order, to compare at a glance.
+    const widths = [0, 1, 2, 3, 4, 5].map((n) => {
+      const [a, b] = validInterval(fn, coefficients(fn, xop, n), xop, tol);
+      return b - a;
+    });
+    const argName = key === 'cos' || key === 'sin' ? 'Δx [rad]' : 'Δx';
+    q('#op-taylor-readout').innerHTML = `
+      <table>
+        <tr><th>n</th>${c.map((_, n) => `<th>c<sub>${n}</sub></th>`).join('')}</tr>
+        <tr><th>f⁽ⁿ⁾(x<sub>op</sub>)/n!</th>${c.map((v) => `<td>${fmt(v, 4)}</td>`).join('')}</tr>
+      </table>
+      <p class="note">Series in ${argName}: f(x) ≈ Σ cₙ·Δxⁿ, Δx = x − x<sub>op</sub>${key === 'cos' || key === 'sin'
+        ? ' converted to radians, since the derivative of sin is cos only when the angle is in radians'
+        : ''}.</p>
+      <table>
+        <tr><th>order</th>${widths.map((_, n) => `<th>${n}</th>`).join('')}</tr>
+        <tr><th>width within ±${fmt(tol, 3)}</th>${widths.map((w, n) =>
+          `<td${n === order ? ' class="op-current"' : ''}>${fn.step >= 1 ? w.toFixed(0) + '°' : w.toFixed(2)}</td>`).join('')}</tr>
+      </table>
+      <p class="note">Shaded band: where the order-${order} approximation stays within tolerance,
+        x ∈ [${fn.step >= 1 ? vl.toFixed(0) : vl.toFixed(2)}, ${fn.step >= 1 ? vr.toFixed(0) : vr.toFixed(2)}]${fn.unit}.
+        Band edges stop at the plotted domain.</p>`;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Part 2: pendulum, nonlinear vs linearized                           */
+  /* ------------------------------------------------------------------ */
+
+  const MGL = 9.81, J = 1;
+
+  function drawPendulum() {
+    const thOpDeg = parseFloat(q<HTMLInputElement>('#pd-theta').value);
+    const dTpct = parseFloat(q<HTMLInputElement>('#pd-dt').value);
+    const b = parseFloat(q<HTMLInputElement>('#pd-b').value);
+    q<HTMLOutputElement>('#pd-theta-v').value = thOpDeg.toFixed(0);
+    q<HTMLOutputElement>('#pd-dt-v').value = dTpct.toFixed(0);
+    q<HTMLOutputElement>('#pd-b-v').value = b.toFixed(1);
+
+    const thOp = thOpDeg * DEG;
+    const Top = MGL * Math.sin(thOp);
+    const dT = (dTpct / 100) * MGL;
+    const kLin = MGL * Math.cos(thOp);          // slope of the gravity torque at theta_op
+
+    const tEnd = Math.min(Math.max(10 / (b / (2 * J)), 8), 40);
+    const steps = Math.round(tEnd / 0.002);
+    const dt = tEnd / steps;
+
+    // Nonlinear: J th'' = Top + dT - b th' - mgl sin th, from rest at th_op.
+    // Linear:    J d''  = dT - b d' - mgl cos(th_op) d,  d = th - th_op.
+    let th = thOp, w = 0, d = 0, dw = 0;
+    const nl: Array<[number, number]> = [[0, 0]];
+    const li: Array<[number, number]> = [[0, 0]];
+    const fN = (th: number, w: number) => (Top + dT - b * w - MGL * Math.sin(th)) / J;
+    const fL = (d: number, dw: number) => (dT - b * dw - kLin * d) / J;
+    let maxErr = 0;
+    for (let i = 1; i <= steps; i++) {
+      {
+        const k1 = [w, fN(th, w)];
+        const k2 = [w + dt / 2 * k1[1], fN(th + dt / 2 * k1[0], w + dt / 2 * k1[1])];
+        const k3 = [w + dt / 2 * k2[1], fN(th + dt / 2 * k2[0], w + dt / 2 * k2[1])];
+        const k4 = [w + dt * k3[1], fN(th + dt * k3[0], w + dt * k3[1])];
+        th += dt / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+        w += dt / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+      }
+      {
+        const k1 = [dw, fL(d, dw)];
+        const k2 = [dw + dt / 2 * k1[1], fL(d + dt / 2 * k1[0], dw + dt / 2 * k1[1])];
+        const k3 = [dw + dt / 2 * k2[1], fL(d + dt / 2 * k2[0], dw + dt / 2 * k2[1])];
+        const k4 = [dw + dt * k3[1], fL(d + dt * k3[0], dw + dt * k3[1])];
+        d += dt / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
+        dw += dt / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
+      }
+      if (i % 10 === 0 || i === steps) {
+        nl.push([i * dt, (th - thOp) / DEG]);
+        li.push([i * dt, d / DEG]);
+        maxErr = Math.max(maxErr, Math.abs(th - thOp - d) / DEG);
+      }
+    }
+
+    // Closed-form steady states, for comparison with the simulations.
+    const linSS = kLin > 1e-9 ? dT / kLin / DEG : NaN;
+    const target = (Top + dT) / MGL;
+    const opStable = Math.cos(thOp) > 1e-9;
+    let nlSS = NaN;
+    let nlNote = '';
+    if (Math.abs(target) > 1) {
+      nlNote = 'no equilibrium: the torque exceeds the largest gravity torque (m·g·ℓ), so the rod goes over the top';
+    } else if (!opStable) {
+      nlNote = 'the operating point is inverted, so it is not a stable equilibrium';
+    } else {
+      nlSS = Math.asin(target) / DEG - thOpDeg;
+    }
+
+    const colors = themeColors();
+    const lim = 60;
+    const clip = (pts: Array<[number, number]>) => pts.map(([t, y]) => [t, Math.max(-lim * 1.2, Math.min(lim * 1.2, y))] as [number, number]);
+    const all = [...nl, ...li].map(([, y]) => y).filter(Number.isFinite);
+    const span = Math.min(Math.max(5, ...all.map(Math.abs)) * 1.2, lim);
+    const view = makeView(q<HTMLCanvasElement>('#op-pend'), { xMin: 0, xMax: tEnd, yMin: -span, yMax: span });
+    const tick = span > 30 ? 20 : span > 12 ? 10 : span > 6 ? 4 : 2;
+    const yt: number[] = [];
+    for (let v = tick; v < span; v += tick) yt.push(v, -v);
+    drawAxes(view, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4].map((v) => +v.toFixed(1)),
+      yTicks: yt, xLabel: 't [s]', yLabel: 'Δθ [°]',
+    });
+    if (Number.isFinite(nlSS)) drawPolyline(view, [[0, nlSS], [tEnd, nlSS]], colors.series[0], 1, [3, 4]);
+    if (Number.isFinite(linSS) && opStable) drawPolyline(view, [[0, linSS], [tEnd, linSS]], colors.accent, 1, [3, 4]);
+    drawPolyline(view, clip(nl), colors.series[0], 3);
+    drawPolyline(view, clip(li), colors.accent, 2, [6, 4]);
+
+    const finalNl = nl[nl.length - 1][1];
+    const finalLi = li[li.length - 1][1];
+    q('#op-pend-readout').innerHTML = `
+      <table>
+        <tr><th>holding torque T<sub>op</sub> = mgℓ·sin θ<sub>op</sub></th><td>${fmt(Top, 3)} N·m</td></tr>
+        <tr><th>linearized gravity stiffness mgℓ·cos θ<sub>op</sub></th><td>${fmt(kLin, 3)} N·m/rad</td></tr>
+        <tr><th>step ΔT</th><td>${fmt(dT, 3)} N·m</td></tr>
+        <tr><th>steady Δθ, linear model</th><td>${opStable ? `${fmt(linSS, 3)}°` : '— (negative stiffness: unstable)'}</td></tr>
+        <tr><th>steady Δθ, nonlinear</th><td>${Number.isFinite(nlSS) ? `${fmt(nlSS, 3)}°` : `— ${nlNote}`}</td></tr>
+        <tr><th>simulated Δθ at t = ${tEnd.toFixed(1)} s</th><td>nonlinear ${fmt(finalNl, 3)}° · linear ${fmt(finalLi, 3)}°</td></tr>
+        <tr><th>largest gap between the two</th><td>${fmt(maxErr, 3)}°</td></tr>
+      </table>
+      <p class="note">Solid: nonlinear model. Dashed: operating-point model. Thin dashed lines are the
+        closed-form steady states, which the simulations should settle onto.
+        Curves beyond ±${lim * 1.2}° are clipped.</p>`;
+  }
+
+  q('#op-fn').addEventListener('change', drawTaylor);
+  ['#op-order', '#op-x', '#op-tol'].forEach((s) => q(s).addEventListener('input', drawTaylor));
+  ['#pd-theta', '#pd-dt', '#pd-b'].forEach((s) => q(s).addEventListener('input', drawPendulum));
+  root.querySelectorAll<HTMLButtonElement>('[data-pd]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const [t, s, b] = btn.dataset.pd!.split(',');
+      q<HTMLInputElement>('#pd-theta').value = t;
+      q<HTMLInputElement>('#pd-dt').value = s;
+      q<HTMLInputElement>('#pd-b').value = b;
+      drawPendulum();
+    });
+  });
+  const redraw = () => { drawTaylor(); drawPendulum(); };
+  window.addEventListener('resize', redraw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redraw);
+  redraw();
+</script>

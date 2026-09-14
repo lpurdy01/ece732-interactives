@@ -1,0 +1,272 @@
+---
+// Physical and active state feedback on a mass-spring-damper.
+//
+// A spring and a damper already feed position and velocity back into the
+// force balance. A controller that measures the same states and adds its own
+// gains does not create a new kind of loop: it adds in parallel with the
+// physical ones. What the dynamics see is the total, K_p + K_a and C_p + C_a,
+// and the eigenvalues move accordingly. That includes moving the wrong way:
+// an active gain can cancel physical damping as easily as add to it.
+//
+// The block diagram is drawn from a verified signal graph (feedbackDiagram in
+// src/lib/diagram-problems.mjs); the state equation shown is derived from it.
+import { feedbackDiagram } from '../lib/diagram-problems.mjs';
+import { diagramSvg } from '../lib/diagram-svg';
+const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'pf-diagram' });
+---
+
+<div class="interactive" id="phys-active">
+  <figure class="pf-figure">
+    <div class="dd-diagram" set:html={svg}></div>
+    <figcaption>
+      <span class="pf-key pf-key-physical">physical plant and its own feedback</span>
+      <span class="pf-key pf-key-active">controller: active state feedback</span>
+    </figcaption>
+  </figure>
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider">M <input type="range" id="pf-M" min="0.5" max="5" step="0.05" value="1" />
+        <output id="pf-M-v"></output> kg</label>
+    </div>
+    <div class="param-grid">
+      <label class="slider pf-physical">K<sub>p</sub> <input type="range" id="pf-Kp" min="0" max="100" step="1" value="40" />
+        <output id="pf-Kp-v"></output> N/m</label>
+      <label class="slider pf-physical">C<sub>p</sub> <input type="range" id="pf-Cp" min="0" max="20" step="0.1" value="2" />
+        <output id="pf-Cp-v"></output> N·s/m</label>
+      <label class="slider pf-active">K<sub>a</sub> <input type="range" id="pf-Ka" min="-60" max="100" step="1" value="0" />
+        <output id="pf-Ka-v"></output> N/m</label>
+      <label class="slider pf-active">C<sub>a</sub> <input type="range" id="pf-Ca" min="-20" max="30" step="0.1" value="0" />
+        <output id="pf-Ca-v"></output> N·s/m</label>
+    </div>
+    <div class="presets">
+      <button type="button" data-preset="passive">passive only</button>
+      <button type="button" data-preset="damp">add active damping</button>
+      <button type="button" data-preset="stiffen">stiffen actively</button>
+      <button type="button" data-preset="cancel">C<sub>a</sub> = −C<sub>p</sub></button>
+      <button type="button" data-preset="over">C<sub>a</sub> &lt; −C<sub>p</sub></button>
+      <button type="button" data-preset="soften">K<sub>a</sub> &lt; −K<sub>p</sub></button>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="pf-locus" checked /> eigenvalue paths as each active gain sweeps its slider range</label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="pf-splane" role="img" aria-label="s-plane: passive and total eigenvalues"></canvas>
+      <figcaption>s-plane: ○ passive only · ✕ with active feedback</figcaption>
+    </figure>
+    <figure>
+      <canvas id="pf-response" role="img" aria-label="Position response to a 1 N force command"></canvas>
+      <figcaption>x(t) for a 1 N step command: grey passive, colour with active</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="pf-readout"></div>
+</div>
+
+<script>
+  import katex from 'katex';
+  import { eigen2 } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, themeColors } from '../lib/plot';
+  import { feedbackDiagram } from '../lib/diagram-problems.mjs';
+  import { toTex } from '../lib/diagram-algebra.mjs';
+
+  const root = document.getElementById('phys-active')!;
+  const el = (id: string) => root.querySelector<HTMLInputElement>(`#${id}`)!;
+  const ids = ['pf-M', 'pf-Kp', 'pf-Cp', 'pf-Ka', 'pf-Ca'];
+  const splane = root.querySelector<HTMLCanvasElement>('#pf-splane')!;
+  const response = root.querySelector<HTMLCanvasElement>('#pf-response')!;
+  const readout = root.querySelector<HTMLDivElement>('#pf-readout')!;
+
+  const f = (x: number, d = 2) => (Math.abs(x) < 5 * 10 ** -(d + 1) ? (0).toFixed(d) : x.toFixed(d));
+
+  interface Sys { M: number; K: number; C: number }
+
+  function eig({ M, K, C }: Sys) {
+    // x' = v, v' = (F - K x - C v)/M  ->  A = [0 1; -K/M -C/M]
+    const e = eigen2([0, 1, -K / M, -C / M]);
+    return e.real
+      ? { re: [e.lambda[0], e.lambda[1]], im: [0, 0], complex: false }
+      : { re: [e.lambda[0], e.lambda[0]], im: [e.im, -e.im], complex: true };
+  }
+
+  function describe(s: Sys) {
+    const e = eig(s);
+    const maxRe = Math.max(...e.re);
+    const wn = s.K > 0 ? Math.sqrt(s.K / s.M) : NaN;
+    const zeta = s.K > 0 ? s.C / (2 * Math.sqrt(s.K * s.M)) : NaN;
+    let regime: string;
+    if (s.K <= 0) regime = s.K === 0 ? 'no restoring force' : 'unstable: negative net stiffness';
+    else if (Math.abs(s.C) < 1e-9) regime = 'undamped: sustained oscillation';
+    else if (s.C < 0) regime = 'unstable: negative net damping';
+    else if (zeta < 1 - 1e-3) regime = 'underdamped';
+    else if (zeta <= 1 + 1e-3) regime = 'critically damped';
+    else regime = 'overdamped';
+    const eigText = e.complex ? `${f(e.re[0])} ± ${f(e.im[0])}j` : `${f(e.re[0])}, ${f(e.re[1])}`;
+    return { e, maxRe, wn, zeta, regime, eigText };
+  }
+
+  /** RK4 for M x'' + C x' + K x = F, from rest, F = 1 N. */
+  function simulate(s: Sys, tEnd: number, steps = 1500) {
+    const dt = tEnd / steps;
+    let x = 0, v = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    const acc = (x: number, v: number) => (1 - s.K * x - s.C * v) / s.M;
+    for (let i = 1; i <= steps; i++) {
+      const k1x = v, k1v = acc(x, v);
+      const k2x = v + dt / 2 * k1v, k2v = acc(x + dt / 2 * k1x, v + dt / 2 * k1v);
+      const k3x = v + dt / 2 * k2v, k3v = acc(x + dt / 2 * k2x, v + dt / 2 * k2v);
+      const k4x = v + dt * k3v, k4v = acc(x + dt * k3x, v + dt * k3v);
+      x += dt / 6 * (k1x + 2 * k2x + 2 * k3x + k4x);
+      v += dt / 6 * (k1v + 2 * k2v + 2 * k3v + k4v);
+      out.push([i * dt, x]);
+    }
+    return out;
+  }
+
+  function draw() {
+    const [M, Kp, Cp, Ka, Ca] = ids.map((id) => parseFloat(el(id).value));
+    ids.forEach((id) => {
+      const v = parseFloat(el(id).value);
+      root.querySelector<HTMLOutputElement>(`#${id}-v`)!.value = id === 'pf-M' ? v.toFixed(2)
+        : id.includes('C') ? v.toFixed(1) : v.toFixed(0);
+    });
+    const colors = themeColors();
+    const passive: Sys = { M, K: Kp, C: Cp };
+    const total: Sys = { M, K: Kp + Ka, C: Cp + Ca };
+    const dp = describe(passive), dt = describe(total);
+
+    // ---- s-plane ----
+    const loci: Array<{ pts: Array<[number, number]>; color: string }> = [];
+    if (el('pf-locus').checked) {
+      const sweep = (id: string, make: (g: number) => Sys, color: string) => {
+        const input = el(id);
+        const lo = parseFloat(input.min), hi = parseFloat(input.max);
+        const pts: Array<[number, number]> = [];
+        for (let i = 0; i <= 240; i++) {
+          const e = eig(make(lo + (hi - lo) * (i / 240)));
+          pts.push([e.re[0], e.im[0]], [e.re[1], e.im[1]]);
+        }
+        loci.push({ pts, color });
+      };
+      sweep('pf-Ca', (g) => ({ M, K: Kp + Ka, C: Cp + g }), colors.series[0]);
+      sweep('pf-Ka', (g) => ({ M, K: Kp + g, C: Cp + Ca }), colors.series[1]);
+    }
+    const focus = [...dp.e.re, ...dt.e.re, ...dp.e.im, ...dt.e.im].map(Math.abs);
+    const reach = Math.min(Math.max(4, ...focus) * 1.3, 40);
+    const sv = makeView(splane, { xMin: -reach, xMax: reach * 0.6, yMin: -reach, yMax: reach, equalAspect: true });
+    const step = reach > 20 ? 10 : reach > 8 ? 4 : 2;
+    const ticks: number[] = [];
+    for (let t = -Math.floor(reach / step) * step; t <= reach; t += step) if (t !== 0) ticks.push(t);
+    drawAxes(sv, { xTicks: ticks.filter((t) => t < reach * 0.6), yTicks: ticks, xLabel: 'Re(s)', yLabel: 'Im(s)' });
+
+    // Right half plane shaded: where an eigenvalue means growth.
+    sv.ctx.save();
+    sv.ctx.fillStyle = colors.accent;
+    sv.ctx.globalAlpha = 0.06;
+    sv.ctx.fillRect(sv.x(0), 0, sv.width - sv.x(0), sv.height);
+    sv.ctx.restore();
+
+    for (const locus of loci) {
+      sv.ctx.save();
+      sv.ctx.fillStyle = locus.color;
+      sv.ctx.globalAlpha = 0.35;
+      for (const [re, im] of locus.pts) {
+        if (Math.abs(re) > reach * 1.5 || Math.abs(im) > reach * 1.5) continue;
+        sv.ctx.beginPath(); sv.ctx.arc(sv.x(re), sv.y(im), 1.3, 0, 2 * Math.PI); sv.ctx.fill();
+      }
+      sv.ctx.restore();
+    }
+
+    sv.ctx.save();
+    sv.ctx.lineWidth = 2;
+    sv.ctx.strokeStyle = colors.muted;
+    for (let i = 0; i < 2; i++) {
+      sv.ctx.beginPath(); sv.ctx.arc(sv.x(dp.e.re[i]), sv.y(dp.e.im[i]), 7, 0, 2 * Math.PI); sv.ctx.stroke();
+    }
+    sv.ctx.strokeStyle = colors.accent;
+    sv.ctx.lineWidth = 2.5;
+    for (let i = 0; i < 2; i++) {
+      const px = sv.x(dt.e.re[i]), py = sv.y(dt.e.im[i]), r = 6;
+      sv.ctx.beginPath();
+      sv.ctx.moveTo(px - r, py - r); sv.ctx.lineTo(px + r, py + r);
+      sv.ctx.moveTo(px + r, py - r); sv.ctx.lineTo(px - r, py + r);
+      sv.ctx.stroke();
+    }
+    sv.ctx.restore();
+
+    // ---- time response ----
+    const rate = (d: ReturnType<typeof describe>) => {
+      const worst = Math.max(...d.e.re);
+      return Math.abs(worst) < 1e-6 ? 0 : worst;
+    };
+    const span = (r: number, wn: number) =>
+      r < 0 ? 6 / -r : r > 0 ? 4 / r : 20 / Math.max(wn || 1, 1);
+    const tEnd = Math.min(Math.max(span(rate(dp), dp.wn), span(rate(dt), dt.wn), 2), 20);
+    const xp = simulate(passive, tEnd);
+    const xt = simulate(total, tEnd);
+    const scale = Math.max(Kp > 0 ? 2 / Kp : 0.1, total.K > 0 ? 2 / total.K : 0, 0.02);
+    const clip = (pts: Array<[number, number]>) => pts.map(([t, x]) => [t, Math.max(-scale * 1.6, Math.min(scale * 1.6, x))] as [number, number]);
+    const rv = makeView(response, { xMin: 0, xMax: tEnd, yMin: -scale * 0.6, yMax: scale * 1.6 });
+    drawAxes(rv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd].map((v) => +v.toFixed(1)),
+      yTicks: [+(scale / 2).toPrecision(2), +scale.toPrecision(2)],
+      xLabel: 't [s]', yLabel: 'x [m]',
+    });
+    if (total.K > 0) drawPolyline(rv, [[0, 1 / total.K], [tEnd, 1 / total.K]], colors.muted, 1, [4, 4]);
+    drawPolyline(rv, clip(xp), colors.muted, 2, [5, 3]);
+    drawPolyline(rv, clip(xt), colors.accent, 2.25);
+
+    // ---- readout ----
+    const velocityRow = toTex(feedbackDiagram.velocityRow, { K_p: { tex: 'K_p' }, K_a: { tex: 'K_a' }, C_p: { tex: 'C_p' }, C_a: { tex: 'C_a' }, F_cmd: { tex: 'F_{cmd}' } });
+    const ss = (s: Sys) => (s.K > 0 && s.C > 0 ? `${f(1 / s.K, 4)} m` : '—');
+    const zetaText = (d: ReturnType<typeof describe>) => (Number.isFinite(d.zeta) ? f(d.zeta, 3) : '—');
+    const wnText = (d: ReturnType<typeof describe>) => (Number.isFinite(d.wn) ? `${f(d.wn)} rad/s` : '—');
+
+    let note = '';
+    if (total.C < -1e-9 && Cp > 0) {
+      note = `The active damping gain (${f(Ca, 1)}) is larger in magnitude than the physical damper (${f(Cp, 1)}) and of opposite sign: net damping is negative, so energy is pumped in and the eigenvalues cross into the right half plane.`;
+    } else if (Math.abs(total.C) < 1e-9 && Cp > 0) {
+      note = 'The active damping gain exactly cancels the physical damper. Net damping is zero, so the eigenvalues sit on the imaginary axis and the mass oscillates indefinitely even though the damper is physically there.';
+    } else if (total.K < 0) {
+      note = 'Net stiffness is negative: the "spring" pushes the mass away from equilibrium, and one real eigenvalue is positive.';
+    }
+
+    readout.innerHTML = `
+      <div class="pf-eq">${katex.renderToString(`\\dot{v} = ${velocityRow}`, { throwOnError: false })}</div>
+      <table>
+        <tr><th></th><th>passive only</th><th>passive + active</th></tr>
+        <tr><th>net stiffness</th><td>${f(Kp, 0)} N/m</td><td>${f(total.K, 0)} N/m</td></tr>
+        <tr><th>net damping</th><td>${f(Cp, 1)} N·s/m</td><td>${f(total.C, 1)} N·s/m</td></tr>
+        <tr><th>eigenvalues</th><td>${dp.eigText}</td><td>${dt.eigText}</td></tr>
+        <tr><th>ωₙ</th><td>${wnText(dp)}</td><td>${wnText(dt)}</td></tr>
+        <tr><th>ζ</th><td>${zetaText(dp)}</td><td>${zetaText(dt)}</td></tr>
+        <tr><th>regime</th><td><span class="tag">${dp.regime}</span></td><td><span class="tag">${dt.regime}</span></td></tr>
+        <tr><th>steady x for 1 N</th><td>${ss(passive)}</td><td>${ss(total)}</td></tr>
+      </table>
+      ${note ? `<p class="note pf-note">${note}</p>` : ''}
+      <p class="note">Gains carry units: a stiffness is N/m and a damping is N·s/m whether a spring
+        or a controller provides it, which is exactly why the two can be added.</p>`;
+  }
+
+  const presets: Record<string, () => Partial<Record<string, number>>> = {
+    passive: () => ({ 'pf-Ka': 0, 'pf-Ca': 0 }),
+    damp: () => ({ 'pf-Ka': 0, 'pf-Ca': 10 }),
+    stiffen: () => ({ 'pf-Ka': 60, 'pf-Ca': 0 }),
+    cancel: () => ({ 'pf-Ca': -parseFloat(el('pf-Cp').value) }),
+    over: () => ({ 'pf-Ca': -parseFloat(el('pf-Cp').value) - 2 }),
+    soften: () => ({ 'pf-Ka': Math.max(-60, -parseFloat(el('pf-Kp').value) - 15), 'pf-Ca': 0 }),
+  };
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      for (const [id, v] of Object.entries(presets[btn.dataset.preset!]())) el(id).value = String(v);
+      draw();
+    });
+  });
+  [...ids, 'pf-locus'].forEach((id) => el(id).addEventListener('input', draw));
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  draw();
+</script>

@@ -1,5 +1,5 @@
 /**
- * Minimal canvas plotting helpers shared by the Week 1 interactives.
+ * Minimal canvas plotting helpers shared by the interactives.
  *
  * Handles the two things every one of them needs and that are easy to get
  * subtly wrong: device-pixel-ratio scaling (so lines are crisp, not blurry)

@@ -1,0 +1,345 @@
+---
+// Block diagram -> equations practice.
+//
+// Take a state block diagram apart into numbered regions, write the one
+// equation each region stands for, then eliminate the internal signals to get
+// the state equations and transfer functions.
+//
+// Answers are never stored as an answer key. Each diagram is a signal graph
+// (src/lib/diagram-problems.mjs) and every expected equation is derived from
+// that graph (src/lib/diagram-algebra.mjs), so what is drawn and what is
+// marked correct cannot drift apart. Transfer functions and slopes, which do
+// need a stated answer, are checked against an independent linear solve and
+// finite differences by verify/verify-diagram-problems.mjs.
+import { problems } from '../lib/diagram-problems.mjs';
+---
+
+<div class="interactive dd" id="diagram-decomp">
+  <div class="presets dd-problems" role="tablist" aria-label="Practice diagrams">
+    {problems.map((p, i) => (
+      <button type="button" role="tab" data-problem={p.id} aria-selected={i === 0 ? 'true' : 'false'}>
+        {i + 1}. {p.title}
+      </button>
+    ))}
+  </div>
+
+  <div class="dd-head">
+    <p class="dd-level" id="dd-level"></p>
+    <p class="dd-blurb" id="dd-blurb"></p>
+    <ul class="dd-inputs" id="dd-inputs"></ul>
+  </div>
+
+  <div class="toggles dd-toggles">
+    <label><input type="checkbox" id="dd-study" /> study mode: show every equation</label>
+    <label><input type="checkbox" id="dd-show-regions" checked /> show regions</label>
+    <button type="button" class="dd-reset" id="dd-reset">reset this diagram</button>
+  </div>
+
+  <div class="dd-diagram" id="dd-diagram"></div>
+  <p class="dd-progress" id="dd-progress" aria-live="polite"></p>
+
+  <h3 class="dd-section">1 · One equation per region</h3>
+  <ol class="dd-cards" id="dd-cards"></ol>
+
+  <h3 class="dd-section">2 · Put it back together</h3>
+  <p class="hint">Eliminate every internal signal. State equations come out in the time domain
+    (no <i>s</i>); transfer functions in <i>s</i>.</p>
+  <ol class="dd-cards dd-targets" id="dd-targets"></ol>
+
+  <details class="dd-signs" id="dd-signs-box">
+    <summary>Sign check: every junction, its signs, and the terms they produce</summary>
+    <div class="readout" id="dd-signs"></div>
+  </details>
+
+  <details class="dd-syntax">
+    <summary>How to type an answer</summary>
+    <ul>
+      <li>Type only the right-hand side. <code>q_in - q_loss</code>, not <code>CdT = q_in - q_loss</code> (either works).</li>
+      <li>Multiply with <code>*</code>, divide with <code>/</code>, powers with <code>^</code>: <code>1/(R*C*s + 1)</code>.</li>
+      <li>Functions: <code>sin(theta)</code>, <code>cos(theta_op)</code>, <code>sqrt(h)</code>.</li>
+      <li><code>s</code> is the Laplace variable, so <code>w/s</code> means an integral of <code>w</code>.</li>
+      <li>The symbol buttons insert the exact spelling. Any equivalent arrangement is accepted.
+          It is checked numerically, not by matching text.</li>
+    </ul>
+  </details>
+</div>
+
+<script>
+  import katex from 'katex';
+  import { problems } from '../lib/diagram-problems.mjs';
+  import {
+    checkRegionAnswer, checkTarget, readExpression, toTex, regionInputs,
+    regionParams, signTable, targetTruth,
+  } from '../lib/diagram-algebra.mjs';
+  import { diagramSvg, cropBox, regionColor } from '../lib/diagram-svg';
+
+  const root = document.getElementById('diagram-decomp')!;
+  const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+  const STORE = 'ece732-diagram-decomposition-v1';
+
+  let current = problems[0];
+  let progress: Record<string, Record<string, 'solved' | 'revealed'>> = {};
+  try { progress = JSON.parse(localStorage.getItem(STORE) ?? '{}') ?? {}; } catch { progress = {}; }
+
+  const save = () => { try { localStorage.setItem(STORE, JSON.stringify(progress)); } catch { /* private mode */ } };
+  const state = (key: string) => progress[current.id]?.[key];
+  const mark = (key: string, value: 'solved' | 'revealed') => {
+    progress[current.id] = progress[current.id] ?? {};
+    if (progress[current.id][key] !== 'solved') progress[current.id][key] = value;
+    save();
+  };
+
+  const tex = (t: string, display = false) =>
+    katex.renderToString(t, { throwOnError: false, displayMode: display });
+  const symTex = (name: string) => toTex(name, current.symbols);
+  const pretty = (name: string) => tex(symTex(name));
+
+  /* ----------------------------------------------------------------- */
+
+  function renderHeader() {
+    $('#dd-level').textContent = current.level;
+    $('#dd-blurb').textContent = current.blurb;
+    const items = Object.entries(current.inputs).map(([name, info]: [string, any]) =>
+      `<li><span class="dd-role dd-role-${info.role}">${info.role}</span> ${pretty(name)} ${info.desc}</li>`);
+    const params = Object.entries(current.params ?? {}).map(([name, desc]) =>
+      `${pretty(name)} ${desc}`).join(' · ');
+    $('#dd-inputs').innerHTML = items.join('') + (params ? `<li class="dd-params">${params}</li>` : '');
+    root.querySelectorAll<HTMLButtonElement>('.dd-problems button').forEach((b) =>
+      b.setAttribute('aria-selected', String(b.dataset.problem === current.id)));
+  }
+
+  function renderDiagram() {
+    const showRegions = $<HTMLInputElement>('#dd-show-regions').checked;
+    $('#dd-diagram').innerHTML = diagramSvg(current, { regions: showRegions, className: 'dd-main' });
+    // Wide diagrams keep a legible label size and scroll inside their own box
+    // on a narrow screen instead of shrinking to unreadable.
+    $('#dd-diagram').querySelector<SVGElement>('svg')!.style.minWidth = `${Math.round(current.viewBox[2] * 0.72)}px`;
+    // Hit-test by region box, not by event target: blocks and wires are drawn
+    // on top of the region tint, so a click on a block inside a region would
+    // otherwise land on the block and do nothing.
+    const svg = $('#dd-diagram').querySelector<SVGSVGElement>('svg')!;
+    svg.addEventListener('click', (e) => {
+      if (!showRegions) return;
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+      const hits = current.regions
+        .filter((r: any) => pt.x >= r.box[0] && pt.x <= r.box[0] + r.box[2] && pt.y >= r.box[1] && pt.y <= r.box[1] + r.box[3])
+        .sort((a: any, b: any) => a.box[2] * a.box[3] - b.box[2] * b.box[3]);
+      if (!hits.length) return;
+      const card = root.querySelector<HTMLElement>(`.dd-card[data-region="${hits[0].n}"]`);
+      card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // A solved card hides its input, and a hidden input cannot take focus.
+      const target = card?.classList.contains('is-done') ? card : card?.querySelector<HTMLInputElement>('.dd-input');
+      target?.focus({ preventScroll: true });
+      focusRegion(hits[0].n);
+    });
+  }
+
+  function focusRegion(n: number | null) {
+    const svg = $('#dd-diagram').querySelector('svg');
+    if (!svg) return;
+    svg.classList.toggle('has-focus', n !== null);
+    svg.querySelectorAll<SVGGElement>('.dd-region').forEach((g) =>
+      g.classList.toggle('focus', Number(g.dataset.n) === n));
+  }
+
+  function chips(names: string[]) {
+    return names.map((n) =>
+      `<button type="button" class="dd-chip" data-insert="${n}" title="${n}">${pretty(n)}</button>`).join('');
+  }
+
+  function answerBlock(lhsTex: string, key: string, symbols: string[]) {
+    return `
+      <div class="dd-eq">
+        <span class="dd-lhs">${tex(lhsTex + ' =')}</span>
+        <input class="dd-input" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" data-key="${key}" aria-label="right-hand side" />
+      </div>
+      <div class="dd-preview" aria-hidden="true"></div>
+      <div class="dd-chips">${chips(symbols)}</div>
+      <div class="dd-actions">
+        <button type="button" class="dd-check">check</button>
+        <button type="button" class="dd-hint-btn">hint</button>
+        <button type="button" class="dd-reveal">show answer</button>
+      </div>
+      <p class="dd-feedback" role="status"></p>`;
+  }
+
+  function renderCards() {
+    const study = $<HTMLInputElement>('#dd-study').checked;
+    $('#dd-cards').innerHTML = current.regions.map((r: any) => {
+      const key = `r${r.n}`;
+      const inputs = regionInputs(current, r.members);
+      const { params, usesS } = regionParams(current, r.members);
+      const done = study || state(key);
+      const eqTex = `${symTex(r.out)} = ${toTex(r.show, current.symbols)}`;
+      return `
+        <li class="dd-card ${done ? 'is-done' : ''} ${state(key) === 'solved' ? 'is-solved' : ''}"
+            data-region="${r.n}" data-key="${key}" tabindex="-1" style="--rc:${regionColor(r.n)}">
+          <div class="dd-card-body">
+            <div class="dd-card-title"><span class="dd-num">${r.n}</span> ${r.title}</div>
+            <p class="dd-card-inputs">in: ${inputs.map(pretty).join(', ')} &nbsp;→&nbsp; out: ${pretty(r.out)}</p>
+            <div class="dd-solution">
+              <div class="dd-eqshow">${tex(eqTex, true)}</div>
+              <p class="dd-read">${r.read}</p>
+            </div>
+            <div class="dd-work">
+              ${answerBlock(symTex(r.out), key, [...inputs, ...params, ...(usesS ? ['s'] : [])])}
+              <p class="dd-hint" hidden>${r.hint}</p>
+            </div>
+          </div>
+          <div class="dd-crop">${diagramSvg(current, { viewBox: cropBox(current, r), onlyRegion: r.n, className: 'dd-cropsvg',
+            ariaLabel: `Region ${r.n}: ${r.title}` })}</div>
+        </li>`;
+    }).join('');
+
+    $('#dd-targets').innerHTML = current.targets.map((t: any, i: number) => {
+      const key = `t${i + 1}`;
+      const done = study || state(key);
+      const truth = targetTruth(current, t);
+      const shown = t.display ?? truth;
+      return `
+        <li class="dd-card dd-target ${done ? 'is-done' : ''} ${state(key) === 'solved' ? 'is-solved' : ''}" data-key="${key}" data-target="${i}">
+          <div class="dd-card-body">
+            <div class="dd-card-title"><span class="dd-num dd-num-t">${String.fromCharCode(65 + i)}</span> ${t.prompt}</div>
+            <div class="dd-solution"><div class="dd-eqshow">${tex(`${t.lhs} = ${toTex(shown, current.symbols)}`, true)}</div></div>
+            <div class="dd-work">${answerBlock(t.lhs, key, t.vars)}</div>
+          </div>
+        </li>`;
+    }).join('');
+
+    wireCards();
+    renderProgress();
+  }
+
+  function wireCards() {
+    root.querySelectorAll<HTMLElement>('.dd-card').forEach((card) => {
+      const input = card.querySelector<HTMLInputElement>('.dd-input')!;
+      const preview = card.querySelector<HTMLElement>('.dd-preview')!;
+      const feedback = card.querySelector<HTMLElement>('.dd-feedback')!;
+      const key = card.dataset.key!;
+      const region = card.dataset.region ? current.regions.find((r: any) => String(r.n) === card.dataset.region) : null;
+      const target = card.dataset.target ? current.targets[Number(card.dataset.target)] : null;
+
+      if (region) {
+        card.addEventListener('mouseenter', () => focusRegion(region.n));
+        card.addEventListener('focusin', () => focusRegion(region.n));
+        card.addEventListener('mouseleave', () => focusRegion(null));
+      }
+
+      input.addEventListener('input', () => {
+        const parsed = readExpression(input.value, region?.out ?? null);
+        try {
+          preview.innerHTML = !input.value.trim() || parsed.error ? '' : tex(toTex(parsed.node, current.symbols));
+        } catch {
+          preview.innerHTML = '';   // a preview is a convenience; never let it break typing
+        }
+        card.classList.remove('is-wrong');
+        feedback.textContent = '';
+      });
+
+      const check = () => {
+        const verdict = region
+          ? checkRegionAnswer(current, region, input.value, pretty)
+          : checkTarget(current, target, input.value, pretty);
+        feedback.innerHTML = verdict.message;
+        feedback.dataset.status = verdict.status;
+        card.classList.toggle('is-wrong', verdict.status !== 'correct');
+        if (verdict.status === 'correct') {
+          mark(key, 'solved');
+          card.classList.add('is-done', 'is-solved');
+          renderProgress();
+        }
+      };
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') check(); });
+      card.querySelector('.dd-check')!.addEventListener('click', check);
+
+      card.querySelector('.dd-hint-btn')!.addEventListener('click', () => {
+        const hint = card.querySelector<HTMLElement>('.dd-hint');
+        if (hint) hint.hidden = false;
+        else feedback.innerHTML = target?.kind === 'state'
+          ? 'Start from the junction feeding this state\'s integrator, then substitute each incoming signal until only states, inputs and parameters remain.'
+          : target?.kind === 'tf'
+          ? 'Write each region equation in s, set the other inputs to zero, and eliminate signals one at a time.'
+          : target?.kind === 'slope'
+          ? 'Differentiate the block\'s function with respect to that input, then evaluate at the operating point.'
+          : 'At an equilibrium every state derivative is zero.';
+      });
+
+      card.querySelector('.dd-reveal')!.addEventListener('click', () => {
+        mark(key, 'revealed');
+        card.classList.add('is-done');
+        renderProgress();
+      });
+
+      card.querySelectorAll<HTMLButtonElement>('.dd-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          const text = chip.dataset.insert!;
+          const start = input.selectionStart ?? input.value.length;
+          const end = input.selectionEnd ?? input.value.length;
+          input.value = input.value.slice(0, start) + text + input.value.slice(end);
+          input.focus();
+          input.setSelectionRange(start + text.length, start + text.length);
+          input.dispatchEvent(new Event('input'));
+        });
+      });
+    });
+  }
+
+  function renderProgress() {
+    const count = (prefix: string, total: number) => {
+      const entries = Object.entries(progress[current.id] ?? {}).filter(([k]) => k.startsWith(prefix));
+      return { solved: entries.filter(([, v]) => v === 'solved').length, revealed: entries.filter(([, v]) => v === 'revealed').length, total };
+    };
+    const r = count('r', current.regions.length);
+    const t = count('t', current.targets.length);
+    const part = (c: any) => `${c.solved}/${c.total} solved${c.revealed ? `, ${c.revealed} shown` : ''}`;
+    $('#dd-progress').textContent = `Regions ${part(r)} · System ${part(t)}`;
+  }
+
+  function renderSigns() {
+    const rows = signTable(current).map((j: any) => {
+      const terms = j.terms.map((term: any, i: number) =>
+        `${term.sign === '-' ? '-' : i === 0 ? '' : '+'} ${symTex(term.signal)}`).join(' ');
+      const badge = j.region ? `<span class="dd-num" style="--rc:${regionColor(j.region)}">${j.region}</span>` : '';
+      return `<tr><td>${badge}</td><td>${j.signs}</td><td>${tex(`${symTex(j.out)} = ${terms}`)}</td></tr>`;
+    });
+    $('#dd-signs').innerHTML = `<table><tr><th>region</th><th>signs in order</th><th>junction equation</th></tr>${rows.join('')}</table>
+      <p class="note">Read straight off the diagram's wiring, which is also what every answer is checked against.</p>`;
+  }
+
+  function renderAll() {
+    renderHeader();
+    renderDiagram();
+    renderCards();
+    renderSigns();
+  }
+
+  /* ----------------------------------------------------------------- */
+
+  root.querySelectorAll<HTMLButtonElement>('.dd-problems button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      current = problems.find((p) => p.id === btn.dataset.problem)!;
+      history.replaceState(null, '', `#${current.id}`);
+      renderAll();
+    });
+  });
+  $('#dd-study').addEventListener('change', renderCards);
+  $('#dd-show-regions').addEventListener('change', renderDiagram);
+  $('#dd-reset').addEventListener('click', () => {
+    delete progress[current.id];
+    save();
+    renderCards();
+  });
+
+  // Deep link: /interactives/diagram-decomposition/#pendulum. Also follow the
+  // hash when it changes on an open page (back button, edited address bar).
+  const fromHash = () => problems.find((p) => `#${p.id}` === location.hash);
+  current = fromHash() ?? current;
+  window.addEventListener('hashchange', () => {
+    const next = fromHash();
+    if (next && next !== current) { current = next; renderAll(); }
+  });
+  renderAll();
+</script>

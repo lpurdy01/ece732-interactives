@@ -102,8 +102,12 @@ function eigenvector2(m: Mat2, lambda: number): Vec2 {
   const n = Math.hypot(v[0], v[1]);
   if (n < 1e-12) return [1, 0]; // M is lambda*I: every direction is an eigenvector
   v = [v[0] / n, v[1] / n];
-  // Keep orientation stable so the drawing does not flip as sliders move.
-  return v[0] < 0 || (Math.abs(v[0]) < 1e-12 && v[1] < 0) ? [-v[0], -v[1]] : v;
+  // Keep orientation stable so the drawing does not flip as sliders move. The
+  // deadband must apply to the first test too: without it, [-1e-13, 1] was
+  // flipped to point DOWN while [1e-13, 1] pointed up, so a vertical
+  // eigenvector jittered between the two on floating-point noise. (Found by
+  // the external correctness review, 2026-09-14.)
+  return v[0] < -1e-12 || (Math.abs(v[0]) <= 1e-12 && v[1] < 0) ? [-v[0], -v[1]] : v;
 }
 
 /**

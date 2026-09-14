@@ -281,6 +281,219 @@ async function checkModal(page, origin, report) {
 
 /* ------------------------------------------------------------------ */
 
+async function checkDiagramDecomposition(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/diagram-decomposition/`, { waitUntil: 'networkidle' });
+
+  const expected = { 'heated-block': 4, 'series-rlc': 4, 'two-inertia': 6, pendulum: 5, 'valve-tank': 3 };
+  for (const [id, n] of Object.entries(expected)) {
+    await page.click(`button[data-problem="${id}"]`);
+    await page.waitForTimeout(60);
+    const counts = await page.evaluate(() => ({
+      badges: document.querySelectorAll('#dd-diagram .dd-region').length,
+      cards: document.querySelectorAll('#dd-cards .dd-card').length,
+      crops: document.querySelectorAll('#dd-cards .dd-cropsvg').length,
+      wires: document.querySelectorAll('#dd-diagram .dd-wire').length,
+      katexErrors: document.querySelectorAll('#diagram-decomp .katex-error').length,
+    }));
+    report.check(`decomp ${id}: ${n} numbered regions, cards and crops`,
+                 counts.badges === n && counts.cards === n && counts.crops === n,
+                 JSON.stringify(counts));
+    report.check(`decomp ${id}: diagram drawn and no KaTeX errors`, counts.wires > 4 && counts.katexErrors === 0,
+                 JSON.stringify(counts));
+  }
+
+  await page.click('button[data-problem="heated-block"]');
+  const card = (n) => `#dd-cards .dd-card[data-region="${n}"]`;
+  const answer = async (sel, text) => {
+    await page.locator(`${sel} .dd-input`).fill(text);
+    await page.locator(`${sel} .dd-check`).click();
+    await page.waitForTimeout(40);
+    return {
+      status: await page.locator(`${sel} .dd-feedback`).getAttribute('data-status'),
+      text: await page.locator(`${sel} .dd-feedback`).innerText(),
+    };
+  };
+
+  // Diagnostics name the misreading, not just "wrong".
+  let r = await answer(card(1), 'q_in + q_loss');
+  report.check('decomp: flipped junction sign is named as a sign error',
+               r.status === 'wrong' && /sign/i.test(r.text), r.text);
+  r = await answer(card(2), 'CdT/C');
+  report.check('decomp: missing integrator is named', r.status === 'wrong' && /integrator/i.test(r.text), r.text);
+  r = await answer(card(2), 'dT/s');
+  report.check('decomp: an internal signal is rejected with an explanation',
+               r.status === 'invalid' && /inside this region/i.test(r.text), r.text);
+  r = await answer(card(2), 'CdT*C/s');
+  report.check('decomp: an inverted block is named', r.status === 'wrong' && /inverted/i.test(r.text), r.text);
+
+  // Correct answers, including a rearranged form, are accepted.
+  r = await answer(card(1), '-q_loss + q_in');
+  report.check('decomp: rearranged correct answer accepted', r.status === 'correct', r.text);
+  r = await answer(card(2), 'T = (1/C)*(1/s)*CdT');
+  report.check('decomp: "lhs = rhs" form accepted', r.status === 'correct', r.text);
+  report.check('decomp: solved card switches to its worked equation',
+               await page.locator(`${card(1)}.is-solved .dd-eqshow .katex`).count() > 0);
+
+  const target = (i) => `#dd-targets .dd-card[data-target="${i}"]`;
+  r = await answer(target(1), 'R/(R*C*s + 1)');
+  report.check('decomp: transfer function target accepts the right answer', r.status === 'correct', r.text);
+  r = await answer(target(2), 'R/(R*C*s + 1)');
+  report.check('decomp: disturbance TF rejects the manipulated-input TF', r.status !== 'correct', r.text);
+  r = await answer(target(0), '(q_in - T/R + T_a/R)/C');
+  report.check('decomp: state equation target accepts an expanded form', r.status === 'correct', r.text);
+  await shoot(page, 'decomp-practice');
+
+  // Progress survives a reload (localStorage), and reset clears it.
+  await page.reload({ waitUntil: 'networkidle' });
+  report.check('decomp: progress persists across reload',
+               await page.locator(`${card(1)}.is-solved`).count() === 1);
+  await page.click('#dd-reset');
+  report.check('decomp: reset clears progress', await page.locator('#dd-cards .is-solved').count() === 0);
+
+  // Nonlinear problem: the nonlinear block and the linearization targets.
+  await page.click('button[data-problem="pendulum"]');
+  // Wrong first: a solved card hides its input.
+  r = await answer(card(5), 'm*g*l*theta');
+  report.check('decomp pendulum: small-angle substitute is not accepted for the nonlinear block', r.status !== 'correct', r.text);
+  r = await answer(card(5), 'm*g*l*sin(theta)');
+  report.check('decomp pendulum: nonlinear block equation accepted', r.status === 'correct', r.text);
+  r = await answer(target(3), 'm*g*l*cos(theta_op)');
+  report.check('decomp pendulum: linearized slope accepted', r.status === 'correct', r.text);
+
+  // Study mode shows every equation.
+  await page.check('#dd-study');
+  await page.waitForTimeout(60);
+  const study = await page.evaluate(() => ({
+    done: document.querySelectorAll('.dd-card.is-done').length,
+    all: document.querySelectorAll('.dd-card').length,
+    eqs: document.querySelectorAll('.dd-card .dd-eqshow .katex').length,
+  }));
+  report.check('decomp: study mode reveals every region and target',
+               study.done === study.all && study.eqs >= study.all, JSON.stringify(study));
+  await page.locator('#dd-signs-box summary').click();
+  report.check('decomp: sign table lists every junction',
+               await page.locator('#dd-signs tr').count() === 1 + 1, 'pendulum has one junction');
+  await shoot(page, 'decomp-study');
+  await page.uncheck('#dd-study');
+
+  report.check('decomp: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+/* ------------------------------------------------------------------ */
+
+async function checkPhysicalActive(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/physical-active-feedback/`, { waitUntil: 'networkidle' });
+
+  for (const sel of ['#pf-splane', '#pf-response']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`feedback: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const span = await coloredInkSpan(page, '#pf-response');
+  report.check('feedback: response spans the plot width', span.span > 0.5, `${(span.span * 100).toFixed(0)}%`);
+
+  // M=2, Kp=50, Cp=4, Ka=30, Ca=6 -> 2 s^2 + 10 s + 80 -> s = -2.5 ± j·sqrt(40 - 6.25)
+  for (const [id, v] of [['#pf-M', 2], ['#pf-Kp', 50], ['#pf-Cp', 4], ['#pf-Ka', 30], ['#pf-Ca', 6]]) {
+    await setRange(page, id, v);
+  }
+  await page.waitForTimeout(80);
+  let text = await page.locator('#pf-readout').innerText();
+  const im = Math.sqrt(40 - 6.25).toFixed(2);
+  report.check('feedback: total eigenvalues from K_p+K_a and C_p+C_a', text.includes(`-2.50 ± ${im}j`), text.slice(0, 200));
+  // Passive: 2 s^2 + 4 s + 50 -> -1 ± j·sqrt(25 - 1)
+  report.check('feedback: passive eigenvalues from K_p and C_p only', text.includes(`-1.00 ± ${Math.sqrt(24).toFixed(2)}j`));
+  const zeta = (10 / (2 * Math.sqrt(80 * 2))).toFixed(3);
+  report.check(`feedback: ζ = C/(2√(KM)) = ${zeta}`, text.includes(zeta));
+
+  await page.click('button[data-preset="cancel"]');
+  await page.waitForTimeout(80);
+  text = await page.locator('#pf-readout').innerText();
+  report.check('feedback: C_a = −C_p puts eigenvalues on the imaginary axis',
+               /0\.00 ± [\d.]+j/.test(text) && /undamped/.test(text), text.slice(0, 260));
+  await shoot(page, 'feedback-cancel');
+
+  await page.click('button[data-preset="over"]');
+  await page.waitForTimeout(80);
+  text = await page.locator('#pf-readout').innerText();
+  report.check('feedback: over-cancelled damping reported unstable', /negative net damping/.test(text));
+
+  await page.click('button[data-preset="soften"]');
+  await page.waitForTimeout(80);
+  text = await page.locator('#pf-readout').innerText();
+  report.check('feedback: negative net stiffness reported unstable', /negative net stiffness/.test(text));
+
+  report.check('feedback: velocity equation rendered', await page.locator('#pf-readout .katex').count() > 0);
+  report.check('feedback: diagram drawn', await page.locator('.pf-figure .dd-wire').count() >= 14);
+  report.check('feedback: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+/* ------------------------------------------------------------------ */
+
+async function checkLinearization(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/operating-point-linearization/`, { waitUntil: 'networkidle' });
+
+  for (const sel of ['#op-taylor', '#op-pend']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`linearize: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+
+  // cos about 60°, order 2: c0 = cos60, c1 = -sin60, c2 = -cos60/2.
+  await setRange(page, '#op-x', 60);
+  await setRange(page, '#op-order', 2);
+  await page.waitForTimeout(60);
+  let text = await page.locator('#op-taylor-readout').innerText();
+  const want = [0.5, -Math.sin(Math.PI / 3), -0.25].map((v) => v.toFixed(4));
+  report.check('linearize: Taylor coefficients of cos about 60°', want.every((w) => text.includes(w)),
+               `want ${want} in ${text.slice(0, 120)}`);
+
+  // x² is exactly its own second-order series: the valid band must fill the domain.
+  await page.selectOption('#op-fn', 'square');
+  await setRange(page, '#op-order', 2);
+  await page.waitForTimeout(60);
+  text = await page.locator('#op-taylor-readout').innerText();
+  report.check('linearize: x² at order 2 is exact over the whole domain', /x ∈ \[-3\.00, 3\.00\]/.test(text), text.slice(-160));
+
+  // Pendulum: theta_op = 30°, step 10% of mgl.
+  await setRange(page, '#pd-theta', 30);
+  await setRange(page, '#pd-dt', 10);
+  await setRange(page, '#pd-b', 1);
+  await page.waitForTimeout(120);
+  text = await page.locator('#op-pend-readout').innerText();
+  const num = (re) => parseFloat((text.match(re) || [])[1] ?? 'NaN');
+  const linSS = 0.1 / Math.cos(Math.PI / 6) * 180 / Math.PI;
+  const nlSS = Math.asin(0.6) * 180 / Math.PI - 30;
+  const shownLin = num(/linear model\s+([-\d.]+)°/);
+  const shownNl = num(/steady Δθ, nonlinear\s+([-\d.]+)°/);
+  report.check(`linearize: linear steady state ΔT/(mgℓ cos θop) = ${linSS.toFixed(3)}°`, near(shownLin, linSS, 0.002), `shown ${shownLin}`);
+  report.check(`linearize: nonlinear steady state asin(0.6) − 30° = ${nlSS.toFixed(3)}°`, near(shownNl, nlSS, 0.002), `shown ${shownNl}`);
+  const simNl = num(/nonlinear ([-\d.]+)° · linear/);
+  const simLi = num(/· linear ([-\d.]+)°/);
+  report.check('linearize: RK4 nonlinear simulation settles on the closed-form steady state', near(simNl, nlSS, 0.01), `sim ${simNl}`);
+  report.check('linearize: RK4 linear simulation settles on the closed-form steady state', near(simLi, linSS, 0.01), `sim ${simLi}`);
+  await shoot(page, 'linearize-small-step');
+
+  const gap = async () => { const t = await page.locator('#op-pend-readout').innerText(); return parseFloat((t.match(/largest gap between the two\s+([\d.]+)/) || [])[1]); };
+  await page.click('button[data-pd="30,5,1"]');
+  await page.waitForTimeout(100);
+  const small = await gap();
+  await page.click('button[data-pd="30,40,1"]');
+  await page.waitForTimeout(100);
+  const large = await gap();
+  report.check('linearize: a larger step gives a larger nonlinear/linear gap', large > 4 * small, `${small}° → ${large}°`);
+
+  await page.click('button[data-pd="60,60,1"]');
+  await page.waitForTimeout(100);
+  text = await page.locator('#op-pend-readout').innerText();
+  report.check('linearize: torque beyond mgℓ reports no equilibrium', /no equilibrium/.test(text));
+  await shoot(page, 'linearize-no-equilibrium');
+
+  report.check('linearize: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+/* ------------------------------------------------------------------ */
+
 /**
  * Concept notes: catch the silent rendering failures.
  *
@@ -342,6 +555,9 @@ async function checkResponsiveAndThemes(browser, origin, report) {
     '/interactives/eigenvector-geometry/',
     '/interactives/modal-decomposition/',
     '/interactives/second-order-response/',
+    '/interactives/diagram-decomposition/',
+    '/interactives/physical-active-feedback/',
+    '/interactives/operating-point-linearization/',
   ];
 
   // Phone width: nothing may scroll sideways.
@@ -356,6 +572,7 @@ async function checkResponsiveAndThemes(browser, origin, report) {
     report.check(`mobile 390px: no console errors on ${route}`, errors.length === 0,
                  errors.join(' | '));
     if (route.includes('eigenvector')) await shoot(page, 'mobile-geometry');
+    if (route.includes('diagram-decomposition')) await shoot(page, 'mobile-decomp');
     await page.close();
   }
   await phone.close();
@@ -389,7 +606,8 @@ async function main() {
 
   try {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
-    for (const scenario of [checkEigenGeometry, checkSecondOrder, checkModal]) {
+    for (const scenario of [checkEigenGeometry, checkSecondOrder, checkModal,
+                            checkDiagramDecomposition, checkPhysicalActive, checkLinearization]) {
       const page = await ctx.newPage();
       await scenario(page, server.origin, report);
       await page.close();

@@ -2,7 +2,7 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { href } from '../../lib/href';
 
-const items = [
+const week1 = [
   {
     href: href('/interactives/eigenvector-geometry/'),
     title: 'Geometric View of Eigenvectors',
@@ -26,19 +26,45 @@ const items = [
            'response change shape — and see that the poles are the eigenvalues of A.',
   },
 ];
+
+const week2 = [
+  {
+    href: href('/interactives/diagram-decomposition/'),
+    title: 'Block Diagram to Equations',
+    lecture: 'W2L1 + W2L2 · practice',
+    blurb: 'Five original state block diagrams, from a heated block to a nonlinear valve. ' +
+           "Number the regions, write each one's equation, then eliminate down to state " +
+           'equations and transfer functions. Wrong answers are diagnosed: which sign, which block.',
+  },
+  {
+    href: href('/interactives/physical-active-feedback/'),
+    title: 'Physical and Active State Feedback',
+    lecture: 'W2L1',
+    blurb: "A controller's stiffness and damping gains add in parallel with the spring and " +
+           'damper already there. Move them and watch the eigenvalues follow the totals, ' +
+           'including when an active gain cancels the physical damping.',
+  },
+  {
+    href: href('/interactives/operating-point-linearization/'),
+    title: 'Operating-Point Linearization',
+    lecture: 'W2L2',
+    blurb: 'Taylor series about an operating point, and how far the approximation holds. ' +
+           'Then a pendulum held at an angle: nonlinear and linearized models side by side ' +
+           'as the step grows.',
+  },
+];
 ---
 
-<BaseLayout title="Week 1 Interactives — ECE/ME 732">
-  <h1>Week 1 Interactives</h1>
+<BaseLayout title="Interactives — ECE/ME 732">
+  <h1>Interactives</h1>
   <p class="lede">
-    Tools for building intuition about the Week 1 material: Laplace and second-order
-    response, and the geometric and modal views of eigenvectors. Everything runs in
-    the browser — the numerics are in <code>src/lib/linalg.ts</code> and are checked
-    against known closed-form results.
+    Tools for building intuition, grouped by the week they support. Everything runs in
+    the browser.
   </p>
 
+  <h2>Week 2: State block diagrams, physical feedback, nonlinear models</h2>
   <ul class="card-list">
-    {items.map((item) => (
+    {week2.map((item) => (
       <li>
         <a href={item.href}><h2>{item.title}</h2></a>
         <p class="lecture-ref">{item.lecture}</p>
@@ -47,7 +73,23 @@ const items = [
     ))}
   </ul>
 
-  <h2>Why these three</h2>
+  <h2>Week 1: Laplace, second-order response, eigenvectors</h2>
+  <p class="muted">
+    The numerics are in <code>src/lib/linalg.ts</code> and are checked
+    against known closed-form results.
+  </p>
+
+  <ul class="card-list">
+    {week1.map((item) => (
+      <li>
+        <a href={item.href}><h2>{item.title}</h2></a>
+        <p class="lecture-ref">{item.lecture}</p>
+        <p>{item.blurb}</p>
+      </li>
+    ))}
+  </ul>
+
+  <h3>Why these three</h3>
   <p>
     Week 1 sets up one identity the rest of the course leans on: the poles of a
     transfer function are the eigenvalues of the state-space <code>A</code> matrix,

@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/PhysicalActiveFeedback.astro';
+---
+
+<BaseLayout title="Physical and Active State Feedback — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Physical and Active State Feedback</h1>
+  <p class="lede">
+    A spring already feeds position back into the force on a mass, and a damper
+    feeds back velocity. A controller that measures those same states adds its
+    own gains <em>in parallel</em>. The dynamics only see the sums, so the
+    eigenvalues follow the totals, including when an active gain works against
+    the hardware.
+  </p>
+  <Widget />
+</BaseLayout>

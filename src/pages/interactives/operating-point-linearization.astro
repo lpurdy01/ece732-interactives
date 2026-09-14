@@ -1,0 +1,17 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/OperatingPointLinearization.astro';
+---
+
+<BaseLayout title="Operating-Point Linearization — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Operating-Point Linearization</h1>
+  <p class="lede">
+    A linear model of a nonlinear system is a statement about a neighbourhood:
+    near this operating point, the curve is close to its tangent. How big that
+    neighbourhood is depends on where you are on the curve and how far you let
+    the system wander. Explore both on a plain function, then inside a dynamic model.
+  </p>
+  <Widget />
+</BaseLayout>

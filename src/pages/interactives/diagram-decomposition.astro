@@ -1,0 +1,23 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/DiagramDecomposition.astro';
+---
+
+<BaseLayout title="Block Diagram to Equations — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Block Diagram to Equations</h1>
+  <p class="lede">
+    A state block diagram is a set of equations drawn as a picture. Cut it into
+    regions, write the one equation each region stands for, then eliminate the
+    signals in between. Five practice systems, from one state to nonlinear.
+  </p>
+  <p class="hint">
+    Reading rules used throughout: a summing junction is an equals sign whose
+    output is the signed sum of its inputs; a block multiplies its input by what
+    is written inside it; <i>1/s</i> integrates, and every integrator output is a
+    state; a nonlinear block applies its function to its inputs rather than
+    multiplying. Hover a card to find its region, or click a region to jump to its card.
+  </p>
+  <Widget />
+</BaseLayout>
