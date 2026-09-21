@@ -1,0 +1,379 @@
+---
+// Dynamic stiffness of a voltage-source supply (W3L2, slides 10-18).
+//
+// Same disturbance-rejection metric as the current-source case, but the roles
+// swap: the load current is the disturbance and the output voltage is the
+// response, so DS = Io/Eo and the units are siemens.
+//
+//   Lp di/dt = ei - Rp i - eo        (loop)
+//   Cp deo/dt = i - io               (node)
+//   DS(s) = Io/Eo = -(Lp Cp s^2 + Rp Cp s + 1)/(Lp s + Rp) = -(Cp s + 1/(Lp s + Rp))
+//
+// The interesting feature is the one a first-order intuition does not predict:
+// the curve does not rise monotonically, it has a NOTCH at fr = 1/(2*pi*sqrt(Lp Cp))
+// where the capacitor's admittance and the inductor branch's cancel. At that
+// frequency the supply is at its weakest -- a small load current swings the
+// output voltage a long way -- and reducing Rp, which helps everywhere else,
+// makes the notch deeper because Rp is what damps it.
+//
+// The load-step panel is where that becomes physical: the DC sag is Rp*io
+// (the low-frequency asymptote 1/Rp, read the other way up) and the ringing on
+// top of it is at the notch frequency. One plot explains the other.
+//
+// Two independent checks run on every redraw: the expanded rational DS the
+// lecture writes down is compared against a numeric complex solve of the two
+// circuit equations at every plotted frequency, and the closed-form step
+// response is compared against an RK4 integration of the same two equations.
+import SystemFigures from './SystemFigures.astro';
+import { voltageSourceFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="vss">
+  <SystemFigures {...voltageSourceFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="vs-rp" min="-1.3" max="1" step="0.02" value="-1" />
+        <output id="vs-rp-v">0.100</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="vs-lp" min="-4" max="-2" step="0.02" value="-3" />
+        <output id="vs-lp-v">1.00</output> mH</label>
+      <label class="slider" data-sym="Cp">C<sub>p</sub>
+        <input type="range" id="vs-cp" min="-6" max="-3.3" step="0.02" value="-4.6" />
+        <output id="vs-cp-v">25.1</output> µF</label>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="vs-asym" checked /> asymptotes</label>
+    </div>
+    <div class="presets">
+      <button data-rp="-1">R<sub>p</sub> = 0.1 Ω</button>
+      <button data-rp="0">R<sub>p</sub> = 1 Ω</button>
+      <button data-rp="1">R<sub>p</sub> = 10 Ω</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="vs-frf" role="img" aria-label="Dynamic stiffness against frequency, log-log, with a notch"></canvas>
+      <figcaption>dynamic stiffness |I<sub>o</sub>/E<sub>o</sub>| [Ω⁻¹]</figcaption>
+    </figure>
+    <figure>
+      <canvas id="vs-step" role="img" aria-label="Output voltage after a step in load current"></canvas>
+      <figcaption>e<sub>o</sub>(t) after a 1 A load-current step</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="vs-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, label, themeColors,
+           decades, decadeLabel } from '../lib/plot';
+  import { type Cx, cAdd, cSub, cMul, cDiv, cAbs, quadraticRoots,
+           stepResponseResidues } from '../lib/linalg';
+
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('vss')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const rpEl = q<HTMLInputElement>('#vs-rp');
+  const lpEl = q<HTMLInputElement>('#vs-lp');
+  const cpEl = q<HTMLInputElement>('#vs-cp');
+  const asymEl = q<HTMLInputElement>('#vs-asym');
+  const frfCanvas = q<HTMLCanvasElement>('#vs-frf');
+  const stepCanvas = q<HTMLCanvasElement>('#vs-step');
+  const readout = q<HTMLDivElement>('#vs-readout');
+
+  const F_LO = -1;        // log10 Hz
+  const F_HI = 6;
+  const I_STEP = 1;       // amp of load-current disturbance
+  const SIM_STEPS = 3000;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    // toPrecision flips to exponential above the precision (1004 -> "1.00e+3");
+    // round-tripping through Number keeps plain digits in the readable range.
+    return String(Number(x.toPrecision(d)));
+  };
+
+  /** The expanded rational form the lecture states (slide 15). */
+  function dsRational(f: number, Rp: number, Lp: number, Cp: number): number {
+    const w = 2 * Math.PI * f;
+    const num: Cx = [1 - w * w * Lp * Cp, w * Rp * Cp];
+    const den: Cx = [Rp, w * Lp];
+    return cAbs(cDiv(num, den));
+  }
+
+  /**
+   * The same transfer function, obtained instead by solving the two circuit
+   * equations numerically at s = j*2*pi*f. Nothing here knows the expanded
+   * polynomial, so a slip in that algebra shows up as a disagreement.
+   *
+   *   (Lp s + Rp) I + Eo = 0
+   *   -I + (Cp s) Eo     = -Io
+   *
+   * Driving with Io = 1 and solving the 2x2 system for Eo gives DS = 1/Eo.
+   */
+  function dsSolved(f: number, Rp: number, Lp: number, Cp: number): number {
+    const s: Cx = [0, 2 * Math.PI * f];
+    const a11 = cAdd(cMul([Lp, 0], s), [Rp, 0]);
+    const a12: Cx = [1, 0];
+    const a21: Cx = [-1, 0];
+    const a22 = cMul([Cp, 0], s);
+    const b1: Cx = [0, 0];
+    const b2: Cx = [-1, 0];
+    // Eliminate I: (a22 - a21*a12/a11) Eo = b2 - a21*b1/a11
+    const m = cDiv(a21, a11);
+    const eo = cDiv(cSub(b2, cMul(m, b1)), cSub(a22, cMul(m, a12)));
+    return 1 / cAbs(eo);
+  }
+
+  /**
+   * Closed-form eo(t) for a step in io:
+   *   Eo(s) = -I_STEP (Lp s + Rp) / (Lp Cp * s * (s - s1)(s - s2))
+   * with s1, s2 the roots of s^2 + (Rp/Lp) s + 1/(Lp Cp) -- the same
+   * quadratic the lecture reads omega_n and zeta off on slide 17.
+   */
+  function stepClosedForm(Rp: number, Lp: number, Cp: number) {
+    const [s1, s2] = quadraticRoots(Rp / Lp, 1 / (Lp * Cp));
+    return stepResponseResidues(-I_STEP * Lp, -I_STEP * Rp, Lp * Cp, s1, s2);
+  }
+
+  /**
+   * How many RK4 sub-steps each output sample needs.
+   *
+   * RK4 is stable only while |lambda|*dt stays below about 2.8, and the time
+   * window here is sized from the oscillation period -- which says nothing
+   * about the fastest root. A heavily overdamped case has a root far beyond
+   * 1/period, and integrating it at the window's own step size diverges to
+   * NaN. Sub-stepping fixes that while keeping the output array the fixed
+   * length the verification indexing assumes.
+   */
+  function subSteps(dtOut: number, roots: Cx[]) {
+    const fastest = Math.max(...roots.map(cAbs), 1e-30);
+    return Math.min(Math.max(1, Math.ceil((dtOut * fastest) / 0.1)), 400);
+  }
+
+  /** RK4 on the two circuit equations, with ei = 0 and io a unit step. */
+  function simulate(Rp: number, Lp: number, Cp: number, tEnd: number) {
+    const dtOut = tEnd / SIM_STEPS;
+    const sub = subSteps(dtOut, quadraticRoots(Rp / Lp, 1 / (Lp * Cp)));
+    const dt = dtOut / sub;
+    // state = [i, eo]
+    const f = (i: number, eo: number): [number, number] =>
+      [(-Rp * i - eo) / Lp, (i - I_STEP) / Cp];
+    let i = 0, eo = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      for (let m = 0; m < sub; m++) {
+        const [a1, b1] = f(i, eo);
+        const [a2, b2] = f(i + (dt / 2) * a1, eo + (dt / 2) * b1);
+        const [a3, b3] = f(i + (dt / 2) * a2, eo + (dt / 2) * b2);
+        const [a4, b4] = f(i + dt * a3, eo + dt * b3);
+        i += (dt / 6) * (a1 + 2 * a2 + 2 * a3 + a4);
+        eo += (dt / 6) * (b1 + 2 * b2 + 2 * b3 + b4);
+      }
+      out.push([n * dtOut, eo]);
+    }
+    return out;
+  }
+
+  function draw() {
+    const Rp = Math.pow(10, parseFloat(rpEl.value));
+    const Lp = Math.pow(10, parseFloat(lpEl.value));
+    const Cp = Math.pow(10, parseFloat(cpEl.value));
+
+    q<HTMLOutputElement>('#vs-rp-v').value = Rp.toPrecision(3);
+    q<HTMLOutputElement>('#vs-lp-v').value = (Lp * 1e3).toPrecision(3);
+    q<HTMLOutputElement>('#vs-cp-v').value = (Cp * 1e6).toPrecision(3);
+
+    setFigureValues(root, {
+      Rp: `${Rp.toPrecision(3)} Ω`,
+      Lp: `${(Lp * 1e3).toPrecision(3)} mH`,
+      Cp: `${(Cp * 1e6).toPrecision(3)} µF`,
+    });
+
+    const wn = 1 / Math.sqrt(Lp * Cp);
+    const zeta = (Rp / 2) * Math.sqrt(Cp / Lp);
+    const fr = wn / (2 * Math.PI);
+    const fb = Rp / (2 * Math.PI * Lp);
+    const colors = themeColors();
+
+    /* ---------------- dynamic stiffness, log-log ---------------- */
+
+    const curve: Array<[number, number]> = [];
+    const flat: Array<[number, number]> = [];
+    const falling: Array<[number, number]> = [];
+    const rising: Array<[number, number]> = [];
+    let maxRelDev = 0;
+    const N = 700;   // dense: the notch is narrow and must not be stepped over
+    for (let n = 0; n <= N; n++) {
+      const lf = F_LO + (n / N) * (F_HI - F_LO);
+      const f = Math.pow(10, lf);
+      const mag = dsRational(f, Rp, Lp, Cp);
+      const check = dsSolved(f, Rp, Lp, Cp);
+      maxRelDev = Math.max(maxRelDev, Math.abs(mag - check) / Math.max(check, 1e-30));
+      curve.push([lf, Math.log10(Math.max(mag, 1e-30))]);
+      flat.push([lf, Math.log10(1 / Rp)]);
+      falling.push([lf, Math.log10(1 / (2 * Math.PI * f * Lp))]);
+      rising.push([lf, Math.log10(2 * Math.PI * f * Cp)]);
+    }
+
+    const notchDepth = dsRational(fr, Rp, Lp, Cp);
+    const yHi = Math.ceil(Math.max(...curve.map(([, y]) => y)) + 0.25);
+    // Floor on the whole curve, not just the notch: when Rp is large the notch
+    // is shallower than the 1/Rp shelf, and keying off it alone clipped the
+    // low-frequency end off the bottom of the plot. The clamp is still there
+    // because a lightly damped notch is otherwise deep enough to squash
+    // everything else into the top of the box.
+    const yLo = Math.max(
+      Math.floor(Math.min(Math.log10(notchDepth), ...curve.map(([, y]) => y)) - 0.25),
+      yHi - 6,
+    );
+
+    const fv = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: '|DS| [Ω⁻¹]', origin: false,
+    });
+
+    if (asymEl.checked) {
+      const clip = (pts: Array<[number, number]>) =>
+        pts.filter(([, y]) => y >= yLo - 1 && y <= yHi + 1);
+      drawPolyline(fv, flat, colors.muted, 1, [2, 4]);
+      drawPolyline(fv, clip(falling), colors.series[2], 1, [2, 4]);
+      drawPolyline(fv, clip(rising), colors.series[0], 1, [2, 4]);
+      label(fv, '1/Rp', [F_LO + 0.12, Math.log10(1 / Rp) + 0.2], colors.muted);
+      label(fv, '1/(2πfLp)', [F_LO + 0.12, yLo + 0.9], colors.series[2]);
+      label(fv, '2πfCp', [F_HI - 0.12, yHi - 0.35], colors.series[0], 'right');
+    }
+
+    for (const [f, text] of [[fb, 'fb'], [fr, 'fr']] as Array<[number, string]>) {
+      const lf = Math.log10(f);
+      if (lf < F_LO || lf > F_HI) continue;
+      drawPolyline(fv, [[lf, yLo], [lf, yHi]], colors.muted, 1, [4, 3]);
+      label(fv, text, [lf + 0.08, yHi - 0.35], colors.ink);
+    }
+
+    drawPolyline(fv, curve, colors.accent, 2.5);
+
+    /* ---------------- load step ---------------- */
+
+    const Tn = 2 * Math.PI / wn;
+    const decay = zeta > 0 ? 6 / (zeta * wn) : Infinity;
+    // Long enough to settle, but capped so a lightly damped case stays a
+    // readable oscillation instead of a solid band of ink.
+    const tEnd = Math.min(Math.max(decay, 6 * Tn), 25 * Tn);
+    const numeric = simulate(Rp, Lp, Cp, tEnd);
+    const closed = stepClosedForm(Rp, Lp, Cp);
+    const analytic: Array<[number, number]> = [];
+    for (let n = 0; n <= 600; n++) {
+      const t = (n / 600) * tEnd;
+      analytic.push([t, closed(t)]);
+    }
+
+    const sag = -Rp * I_STEP;
+    const lo = Math.min(...analytic.map(([, v]) => v), sag) * 1.15;
+    const hi = Math.max(...analytic.map(([, v]) => v), 0) + Math.abs(lo) * 0.12;
+
+    const sv = makeView(stepCanvas, { xMin: 0, xMax: tEnd, yMin: lo, yMax: hi, pad: 38 });
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd],
+      yTicks: [sag, lo / 2],
+      xTickLabel: (v) => `${(v * 1e3).toPrecision(2)}m`,
+      yTickLabel: (v) => sig(v, 2),
+      xLabel: 't [s]', yLabel: 'eo [V]',
+    });
+    drawPolyline(sv, [[0, sag], [tEnd, sag]], colors.muted, 1, [4, 4]);
+    label(sv, `sag = −Rp·io = ${sig(sag, 2)} V`, [tEnd * 0.04, sag + Math.abs(lo) * 0.06],
+          colors.muted);
+    drawPolyline(sv, numeric, colors.series[1], 4);       // thick: RK4
+    drawPolyline(sv, analytic, colors.series[0], 1.75);   // thin over it: closed form
+
+    /* ---------------- verification ---------------- */
+
+    let maxGap = 0;
+    for (let n = 0; n <= 600; n++) {
+      const j = Math.round((n / 600) * SIM_STEPS);
+      maxGap = Math.max(maxGap, Math.abs(analytic[n][1] - numeric[j][1]));
+    }
+    const gapPct = (maxGap / Math.abs(sag)) * 100;
+
+    // Ringing frequency read off the simulated trace: mean spacing of the
+    // local minima. If the supply is overdamped there are none, and the tool
+    // says so rather than reporting a number from two samples of noise.
+    const troughs: number[] = [];
+    for (let n = 1; n < numeric.length - 1; n++) {
+      if (numeric[n][1] < numeric[n - 1][1] && numeric[n][1] <= numeric[n + 1][1]) {
+        troughs.push(numeric[n][0]);
+      }
+    }
+    const wd = zeta < 1 ? wn * Math.sqrt(1 - zeta * zeta) : NaN;
+    const fdPredicted = wd / (2 * Math.PI);
+    let ringRow: string;
+    if (troughs.length >= 2) {
+      const spacing = (troughs[troughs.length - 1] - troughs[0]) / (troughs.length - 1);
+      const fdMeasured = 1 / spacing;
+      const err = Math.abs(fdMeasured - fdPredicted) / fdPredicted * 100;
+      ringRow = `${sig(fdMeasured)} Hz measured vs f<sub>d</sub> = ωₙ√(1−ζ²)/2π =
+                 ${sig(fdPredicted)} Hz (${err.toFixed(2)}%)`;
+    } else {
+      ringRow = zeta >= 1
+        ? `none — ζ = ${sig(zeta)} ≥ 1, the supply is overdamped and the notch is gone`
+        : 'not enough cycles in the window to measure';
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>notch frequency f<sub>r</sub></th>
+            <td>${sig(fr)} Hz</td>
+            <td>ωₙ = 1/√(L<sub>p</sub>C<sub>p</sub>) = ${sig(wn)} rad/s</td></tr>
+        <tr><th>damping ζ = (R<sub>p</sub>/2)√(C<sub>p</sub>/L<sub>p</sub>)</th>
+            <td>${sig(zeta)}</td>
+            <td>${zeta < 1 ? 'underdamped — the notch is open'
+                           : 'overdamped — no notch'}</td></tr>
+        <tr><th>stiffness at the notch</th>
+            <td colspan="2">${sig(notchDepth)} Ω⁻¹, i.e. <b>${sig(1 / notchDepth)} V</b>
+            of output swing per amp at f<sub>r</sub>, against only
+            ${sig(Rp)} V per amp at DC — the supply is
+            ${(1 / notchDepth) >= Rp
+              ? `${sig((1 / notchDepth) / Rp)}× weaker there`
+              : `${sig(Rp * notchDepth)}× <em>stiffer</em> there, because this much
+                 damping has filled the notch in entirely`}</td></tr>
+        <tr><th>corner f<sub>b</sub> = R<sub>p</sub>/(2πL<sub>p</sub>)</th>
+            <td colspan="2">${sig(fb)} Hz</td></tr>
+        <tr><th>load-step sag</th>
+            <td colspan="2">${sig(sag)} V per amp = −R<sub>p</sub>·i<sub>o</sub>,
+            the low-frequency asymptote 1/R<sub>p</sub> read the other way up</td></tr>
+        <tr><th>ringing on the step</th><td colspan="2">${ringRow}</td></tr>
+        <tr><th>rational form vs circuit solve</th>
+            <td colspan="2">max deviation <b>${maxRelDev.toExponential(1)}</b> over
+            ${N + 1} frequencies — the expanded polynomial matches a numeric
+            solve of the loop and node equations</td></tr>
+        <tr><th>closed form vs RK4</th>
+            <td colspan="2">${gapPct < 0.5
+              ? `max difference <b>${gapPct.toExponential(1)}%</b> of the sag — the two agree`
+              : `max difference ${gapPct.toFixed(2)}% of the sag`}</td></tr>
+      </table>
+      <p class="note">
+        Raising R<sub>p</sub> damps the notch but lowers 1/R<sub>p</sub>, so the
+        whole low-frequency shelf drops with it: the resistance that fixes the
+        resonance is the same resistance that costs stiffness everywhere below
+        it — and burns the heat.
+      </p>`;
+  }
+
+  [rpEl, lpEl, cpEl].forEach((el) => el.addEventListener('input', draw));
+  asymEl.addEventListener('change', draw);
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => { rpEl.value = btn.dataset.rp!; draw(); });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

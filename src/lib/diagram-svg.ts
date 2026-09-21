@@ -57,6 +57,31 @@ export function markup(text: string): string {
   return out;
 }
 
+/**
+ * Rough advance width of a markup string at the 15px block-label size.
+ *
+ * Only accurate enough to size a fraction bar: a bar fixed at 24 units looks
+ * broken under a denominator like L_p s + R_p + R_a, which is most of them.
+ */
+export function textWidth(text: string): number {
+  let w = 0, i = 0;
+  while (i < text.length) {
+    if (text.startsWith('\\dot{', i)) {
+      const close = text.indexOf('}', i + 5);
+      w += (close - i - 5) * 8;
+      i = close + 1;
+    } else if ((text[i] === '_' || text[i] === '^') && text[i + 1] === '{') {
+      const close = text.indexOf('}', i + 2);
+      w += (close < 0 ? 1 : close - i - 2) * 5.6;
+      i = close < 0 ? text.length : close + 1;
+    } else {
+      w += /[a-z0-9]/i.test(text[i]) ? 8 : 6;
+      i++;
+    }
+  }
+  return w;
+}
+
 export function regionColor(n: number): string {
   return REGION_COLORS[(n - 1) % REGION_COLORS.length];
 }
@@ -110,27 +135,44 @@ export function diagramSvg(problem: any, opts: SvgOptions = {}): string {
   }
 
   for (const el of problem.elements) {
+    // Each element is collected on its own so an element carrying `sym` can be
+    // wrapped in one group: the schematic beside it highlights by `data-sym`,
+    // and a block has to light up as a unit or the rect and its label drift.
+    const own: string[] = [];
+    const close = () => parts.push(
+      el.sym ? `<g class="dd-el" data-sym="${el.sym}">${own.join('')}</g>` : own.join(''));
     if (el.kind === 'sum') {
-      parts.push(`<circle class="dd-sum${el.tone ? ` dd-tone-${el.tone}` : ''}" cx="${el.x}" cy="${el.y}" r="${el.r ?? 13}"/>`);
+      own.push(`<circle class="dd-sum${el.tone ? ` dd-tone-${el.tone}` : ''}" cx="${el.x}" cy="${el.y}" r="${el.r ?? 13}"/>`);
+      close();
       continue;
     }
     const w = el.w ?? 46, h = el.h ?? 40;
-    parts.push(`<rect class="dd-block${el.kind === 'fn' ? ' dd-fn' : ''}${el.tone ? ` dd-tone-${el.tone}` : ''}" x="${el.x - w / 2}" y="${el.y - h / 2}" width="${w}" height="${h}"/>`);
+    own.push(`<rect class="dd-block${el.kind === 'fn' ? ' dd-fn' : ''}${el.tone ? ` dd-tone-${el.tone}` : ''}" x="${el.x - w / 2}" y="${el.y - h / 2}" width="${w}" height="${h}"/>`);
     const label = el.label;
     const ink = el.tone ? ` dd-tone-${el.tone}` : '';
     if (label && typeof label === 'object' && label.frac) {
       const [num, den] = label.frac;
-      parts.push(`<text class="dd-blabel" x="${el.x}" y="${el.y - 5}" text-anchor="middle">${markup(num)}</text>`);
-      parts.push(`<line class="dd-fracbar" x1="${el.x - 12}" y1="${el.y}" x2="${el.x + 12}" y2="${el.y}"/>`);
-      parts.push(`<text class="dd-blabel" x="${el.x}" y="${el.y + 15}" text-anchor="middle">${markup(den)}</text>`);
+      own.push(`<text class="dd-blabel" x="${el.x}" y="${el.y - 5}" text-anchor="middle">${markup(num)}</text>`);
+      const hw = Math.max(12, Math.min(w / 2 - 5, Math.max(textWidth(num), textWidth(den)) / 2 + 3));
+      own.push(`<line class="dd-fracbar" x1="${(el.x - hw).toFixed(1)}" y1="${el.y}" x2="${(el.x + hw).toFixed(1)}" y2="${el.y}"/>`);
+      own.push(`<text class="dd-blabel" x="${el.x}" y="${el.y + 15}" text-anchor="middle">${markup(den)}</text>`);
     } else if (label) {
-      parts.push(`<text class="dd-blabel${ink}" x="${el.x}" y="${el.y + 5}" text-anchor="middle">${markup(String(label))}</text>`);
+      own.push(`<text class="dd-blabel${ink}" x="${el.x}" y="${el.y + 5}" text-anchor="middle">${markup(String(label))}</text>`);
     }
+    // A live value hangs under the block, empty at build time: a figure must
+    // not print a number the page has not computed yet.
+    if (el.value && el.sym) {
+      own.push(`<text class="dd-val" data-val="${el.sym}" x="${el.x}" y="${el.y + h / 2 + 15}" text-anchor="middle"></text>`);
+    }
+    close();
   }
 
   for (const l of problem.labels ?? []) {
     const svg = problem.symbols?.[l.sym]?.svg ?? l.sym;
-    parts.push(`<text class="dd-slabel" x="${l.x}" y="${l.y}" text-anchor="${l.anchor ?? 'middle'}">${markup(svg)}</text>`);
+    const anchor = l.anchor ?? 'middle';
+    const text = `<text class="dd-slabel" x="${l.x}" y="${l.y}" text-anchor="${anchor}">${markup(svg)}</text>`
+      + (l.value ? `<text class="dd-val" data-val="${l.sym}" x="${l.x}" y="${l.y + 13}" text-anchor="${anchor}"></text>` : '');
+    parts.push(l.tag || l.value ? `<g class="dd-el" data-sym="${l.tag ?? l.sym}">${text}</g>` : text);
   }
 
   const aria = esc(opts.ariaLabel ?? `Block diagram: ${problem.title}`);

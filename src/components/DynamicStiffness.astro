@@ -1,0 +1,305 @@
+---
+// Dynamic stiffness of a current-source supply (W3L1, slides 13-21).
+//
+// The disturbance-rejection metric of this course is disturbance per unit
+// response -- here volts of load disturbance per amp of current error, so it
+// carries physical units and is plotted log-log rather than in dB.
+//
+//   (Lp + La) dio/dt = -(Rp + Ra) io - eo      (ideal amplifier, ei = ei*)
+//   DS(s) = Eo(s)/Io(s) = -[(Lp + La) s + (Rp + Ra)]
+//
+// The point worth feeling is that the dynamics only ever see the SUMS. An
+// active gain Ra bought in the controller and a physical resistance Rp bought
+// by using thinner wire land in the same place in the equation and lift the
+// same part of the curve -- but one of them dissipates heat and the other is
+// limited by sample rate, switching frequency and sensor noise (slide 21).
+//
+// The step-response panel is not decoration: it is the check. The RK4
+// integration is an independent path to the same claim, and the corner
+// frequency of the log-log plot and the time constant of the step are the
+// same number seen twice, fb = 1/(2*pi*tau).
+import SystemFigures from './SystemFigures.astro';
+import { dynamicStiffnessFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="dstiff">
+  <SystemFigures {...dynamicStiffnessFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="ds-rp" min="-2" max="1" step="0.02" value="-1" />
+        <output id="ds-rp-v">0.100</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="ds-lp" min="-4" max="-1" step="0.02" value="-3" />
+        <output id="ds-lp-v">1.00</output> mH</label>
+      <label class="slider" data-sym="Ra">R<sub>a</sub>
+        <input type="range" id="ds-ra" min="0" max="5" step="0.05" value="1" />
+        <output id="ds-ra-v">1.00</output> Ω</label>
+      <label class="slider" data-sym="La">L<sub>a</sub>
+        <input type="range" id="ds-la" min="0" max="10" step="0.1" value="0" />
+        <output id="ds-la-v">0.0</output> mH</label>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="ds-asym" checked /> asymptotes</label>
+      <label><input type="checkbox" id="ds-passive" checked /> passive-only curve</label>
+    </div>
+    <div class="presets">
+      <button data-ra="0" data-la="0">passive only</button>
+      <button data-ra="3" data-la="0">active R<sub>a</sub></button>
+      <button data-ra="0" data-la="6">active L<sub>a</sub></button>
+      <button data-ra="3" data-la="6">both</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="ds-frf" role="img" aria-label="Dynamic stiffness against frequency, log-log"></canvas>
+      <figcaption>dynamic stiffness |E<sub>o</sub>/I<sub>o</sub>| [Ω]</figcaption>
+    </figure>
+    <figure>
+      <canvas id="ds-step" role="img" aria-label="Current error after a step disturbance in load voltage"></canvas>
+      <figcaption>i<sub>o</sub>(t) after a 1 V step in e<sub>o</sub></figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="ds-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, label, themeColors,
+           decades, decadeLabel } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('dstiff')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const rpEl = q<HTMLInputElement>('#ds-rp');
+  const lpEl = q<HTMLInputElement>('#ds-lp');
+  const raEl = q<HTMLInputElement>('#ds-ra');
+  const laEl = q<HTMLInputElement>('#ds-la');
+  const asymEl = q<HTMLInputElement>('#ds-asym');
+  const passiveEl = q<HTMLInputElement>('#ds-passive');
+  const frfCanvas = q<HTMLCanvasElement>('#ds-frf');
+  const stepCanvas = q<HTMLCanvasElement>('#ds-step');
+  const readout = q<HTMLDivElement>('#ds-readout');
+
+  const F_LO = -1;          // log10 Hz
+  const F_HI = 4;
+  const E_STEP = 1;         // volt of load disturbance
+  const SIM_STEPS = 1500;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    // toPrecision flips to exponential above the precision (1004 -> "1.00e+3");
+    // round-tripping through Number keeps plain digits in the readable range.
+    return String(Number(x.toPrecision(d)));
+  };
+
+  /** |DS(j2*pi*f)| for total resistance R and total inductance L. */
+  const dsMag = (f: number, R: number, L: number) =>
+    Math.hypot(R, 2 * Math.PI * f * L);
+
+  /**
+   * Step response of (L dio/dt) = -R io - eo to eo = E_STEP * u(t), by RK4.
+   *
+   * Independent of the closed form it is checked against: this integrates the
+   * differential equation the block diagram states, while the closed form
+   * comes out of the Laplace algebra.
+   */
+  function simulate(R: number, L: number, tEnd: number) {
+    const dt = tEnd / SIM_STEPS;
+    const slope = (i: number) => (-R * i - E_STEP) / L;
+    let i = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      const k1 = slope(i);
+      const k2 = slope(i + (dt / 2) * k1);
+      const k3 = slope(i + (dt / 2) * k2);
+      const k4 = slope(i + dt * k3);
+      i += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4);
+      out.push([n * dt, i]);
+    }
+    return out;
+  }
+
+  function draw() {
+    const Rp = Math.pow(10, parseFloat(rpEl.value));
+    const Lp = Math.pow(10, parseFloat(lpEl.value));
+    const Ra = parseFloat(raEl.value);
+    const La = parseFloat(laEl.value) * 1e-3;
+
+    q<HTMLOutputElement>('#ds-rp-v').value = Rp.toPrecision(3);
+    q<HTMLOutputElement>('#ds-lp-v').value = (Lp * 1e3).toPrecision(3);
+    q<HTMLOutputElement>('#ds-ra-v').value = Ra.toFixed(2);
+    q<HTMLOutputElement>('#ds-la-v').value = (La * 1e3).toFixed(1);
+
+    setFigureValues(root, {
+      Rp: `${Rp.toPrecision(3)} Ω`,
+      Lp: `${(Lp * 1e3).toPrecision(3)} mH`,
+      Ra: `${Ra.toFixed(2)} Ω`,
+      La: `${(La * 1e3).toFixed(1)} mH`,
+    });
+
+    const Rt = Rp + Ra;
+    const Lt = Lp + La;
+    const fbPassive = Rp / (2 * Math.PI * Lp);
+    const fbTotal = Rt / (2 * Math.PI * Lt);
+    const colors = themeColors();
+
+    /* ---------------- dynamic stiffness, log-log ---------------- */
+
+    const total: Array<[number, number]> = [];
+    const passive: Array<[number, number]> = [];
+    const flat: Array<[number, number]> = [];
+    const rising: Array<[number, number]> = [];
+    const N = 300;
+    for (let n = 0; n <= N; n++) {
+      const lf = F_LO + (n / N) * (F_HI - F_LO);
+      const f = Math.pow(10, lf);
+      total.push([lf, Math.log10(dsMag(f, Rt, Lt))]);
+      passive.push([lf, Math.log10(dsMag(f, Rp, Lp))]);
+      flat.push([lf, Math.log10(Rt)]);
+      rising.push([lf, Math.log10(2 * Math.PI * f * Lt)]);
+    }
+
+    const shown = passiveEl.checked ? total.concat(passive) : total;
+    let yLo = Math.min(...shown.map(([, y]) => y));
+    let yHi = Math.max(...shown.map(([, y]) => y));
+    yLo = Math.floor(yLo - 0.25);
+    yHi = Math.ceil(yHi + 0.25);
+    if (yHi - yLo < 3) yHi = yLo + 3;
+
+    const fv = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: '|DS| [Ω]', origin: false,
+    });
+
+    if (asymEl.checked) {
+      drawPolyline(fv, flat, colors.muted, 1, [2, 4]);
+      drawPolyline(fv, rising, colors.muted, 1, [2, 4]);
+      label(fv, 'Rp+Ra', [F_LO + 0.15, Math.log10(Rt) + 0.18], colors.muted);
+      label(fv, '2πf(Lp+La)', [F_HI - 0.15, yHi - 0.3], colors.muted, 'right');
+    }
+
+    // Corner frequencies: where the two asymptotes cross. With no active gains
+    // the two coincide, and drawing both labels at the same place printed them
+    // on top of each other -- so that case gets one line and one label.
+    const sameCorner = Math.abs(Math.log10(fbTotal) - Math.log10(fbPassive)) < 0.02;
+    const corners: Array<[number, string, string, number]> = sameCorner
+      ? [[fbTotal, 'fb', colors.accent, 0.25]]
+      : [[fbPassive, 'fb physical', colors.series[1], 0.25],
+         [fbTotal, 'fb total', colors.accent, 0.62]];
+    for (const [f, text, color, dy] of corners) {
+      const lf = Math.log10(f);
+      if (lf < F_LO || lf > F_HI) continue;
+      drawPolyline(fv, [[lf, yLo], [lf, yHi]], color, 1, [4, 3]);
+      label(fv, text, [lf + 0.08, yLo + dy], color);
+    }
+
+    if (passiveEl.checked) drawPolyline(fv, passive, colors.series[1], 1.6, [6, 3]);
+    drawPolyline(fv, total, colors.accent, 2.5);
+
+    /* ---------------- step response ---------------- */
+
+    const tau = Lt / Rt;
+    const tEnd = 6 * tau;
+    const numeric = simulate(Rt, Lt, tEnd);
+    const iFinal = -E_STEP / Rt;
+
+    const analytic: Array<[number, number]> = [];
+    for (let n = 0; n <= 300; n++) {
+      const t = (n / 300) * tEnd;
+      analytic.push([t, iFinal * (1 - Math.exp(-t / tau))]);
+    }
+
+    const sv = makeView(stepCanvas, {
+      xMin: 0, xMax: tEnd, yMin: iFinal * 1.18, yMax: Math.max(-iFinal * 0.12, 1e-9), pad: 38,
+    });
+    const tTick = (v: number) => (tEnd < 0.02 ? `${(v * 1e3).toPrecision(2)}m` : v.toPrecision(2));
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd],
+      yTicks: [iFinal, iFinal / 2],
+      xTickLabel: tTick,
+      yTickLabel: (v) => sig(v, 2),
+      xLabel: 't [s]', yLabel: 'io [A]',
+    });
+    drawPolyline(sv, [[0, iFinal], [tEnd, iFinal]], colors.muted, 1, [4, 4]);
+    drawPolyline(sv, [[tau, iFinal * 1.18], [tau, 0]], colors.muted, 1, [3, 3]);
+    label(sv, 'τ', [tau + tEnd * 0.015, iFinal * 1.1], colors.muted);
+    drawPolyline(sv, numeric, colors.series[1], 4);       // thick: RK4
+    drawPolyline(sv, analytic, colors.series[0], 1.75);   // thin over it: closed form
+
+    /* ---------------- verification ---------------- */
+
+    // Closed form against the independent integration.
+    let maxGap = 0;
+    for (let n = 0; n <= 300; n++) {
+      const j = Math.round((n / 300) * SIM_STEPS);
+      maxGap = Math.max(maxGap, Math.abs(analytic[n][1] - numeric[j][1]));
+    }
+    const gapPct = (maxGap / Math.abs(iFinal)) * 100;
+
+    // Time constant read off the simulated trace, not assumed: the first
+    // sample past 63.2% of the final value. This is the same number as the
+    // corner of the log-log plot, which is the whole point of the panel.
+    const target = iFinal * (1 - Math.exp(-1));
+    let tauMeasured = NaN;
+    for (const [t, i] of numeric) {
+      if (Math.abs(i) >= Math.abs(target)) { tauMeasured = t; break; }
+    }
+    const tauPct = Math.abs(tauMeasured - tau) / tau * 100;
+
+    const dsAtCorner = dsMag(fbTotal, Rt, Lt);
+    const lift = Rt / Rp;
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>totals the dynamics see</th>
+            <td>R<sub>p</sub>+R<sub>a</sub> = <b>${sig(Rt)}</b> Ω</td>
+            <td>L<sub>p</sub>+L<sub>a</sub> = <b>${sig(Lt * 1e3)}</b> mH</td></tr>
+        <tr><th>DS(0) — stiffness at DC</th>
+            <td colspan="2">${sig(Rt)} Ω, so a 1 V disturbance settles the current
+            ${sig(Math.abs(iFinal))} A off target</td></tr>
+        <tr><th>corner frequency</th>
+            <td>passive ${sig(fbPassive)} Hz</td>
+            <td>with active gains ${sig(fbTotal)} Hz</td></tr>
+        <tr><th>|DS| at that corner</th>
+            <td colspan="2">${sig(dsAtCorner)} Ω = √2 · (R<sub>p</sub>+R<sub>a</sub>)</td></tr>
+        <tr><th>low-frequency lift vs passive</th>
+            <td colspan="2">×${sig(lift)} ${Ra === 0 && La === 0
+              ? '<span class="tag">passive only</span>' : ''}</td></tr>
+        <tr><th>closed form vs RK4</th>
+            <td colspan="2">${gapPct < 0.1
+              ? `max difference <b>${gapPct.toExponential(1)}%</b> of final value — the two agree`
+              : `max difference ${gapPct.toFixed(2)}% of final value`}</td></tr>
+        <tr><th>τ measured from the trace</th>
+            <td colspan="2">${sig(tauMeasured)} s vs L/R = ${sig(tau)} s
+            (${tauPct.toFixed(2)}%), and 1/(2πτ) = ${sig(1 / (2 * Math.PI * tau))} Hz
+            is the corner above</td></tr>
+      </table>
+      <p class="note">
+        The corner drawn here is where the two asymptotes actually cross,
+        (R<sub>p</sub>+R<sub>a</sub>)/(2π(L<sub>p</sub>+L<sub>a</sub>)). With
+        L<sub>a</sub> = 0 that is the lecture's
+        f<sub>b active</sub> = (R<sub>p</sub>+R<sub>a</sub>)/(2πL<sub>p</sub>).
+      </p>`;
+  }
+
+  [rpEl, lpEl, raEl, laEl].forEach((el) => el.addEventListener('input', draw));
+  [asymEl, passiveEl].forEach((el) => el.addEventListener('change', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      raEl.value = btn.dataset.ra!;
+      laEl.value = btn.dataset.la!;
+      draw();
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

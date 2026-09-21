@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/MotorStateFeedback.astro';
+---
+
+<BaseLayout title="Modifying a Motor's State Feedback — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Modifying a Motor's State Feedback</h1>
+  <p class="lede">
+    A controller that measures the motor's own states can cancel the feedback
+    paths the hardware already has. Back-EMF is one of those paths — and it was
+    supplying most of the motor's low-frequency disturbance rejection.
+    Decoupling it buys an electrical loop you can tune on its own and costs
+    almost all of that stiffness. All three of the lecture's cases are the same
+    expression with two terms switched on.
+  </p>
+  <Widget />
+</BaseLayout>

@@ -248,3 +248,75 @@ export function solve(A: number[][], b: number[]): number[] {
   }
   return M.map((row, i) => row[n] / row[i]);
 }
+
+/* ---------------------------------------------------------------------------
+   Complex arithmetic, and the one inverse-Laplace form the Week 3 disturbance
+   interactives need.
+
+   Both power-supply tools have to evaluate a transfer function at s = j*omega
+   and invert a step response whose poles may be real or a conjugate pair.
+   Doing that in complex arithmetic covers the underdamped, critically damped
+   and overdamped cases with one expression, instead of three branches that
+   each need their own test.
+   --------------------------------------------------------------------------- */
+
+export type Cx = [number, number];   // [real, imaginary]
+
+export const cAdd = (a: Cx, b: Cx): Cx => [a[0] + b[0], a[1] + b[1]];
+export const cSub = (a: Cx, b: Cx): Cx => [a[0] - b[0], a[1] - b[1]];
+export const cMul = (a: Cx, b: Cx): Cx =>
+  [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]];
+
+export function cDiv(a: Cx, b: Cx): Cx {
+  const d = b[0] * b[0] + b[1] * b[1];
+  return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d];
+}
+
+export const cAbs = (a: Cx): number => Math.hypot(a[0], a[1]);
+
+export function cExp(a: Cx): Cx {
+  const m = Math.exp(a[0]);
+  return [m * Math.cos(a[1]), m * Math.sin(a[1])];
+}
+
+/** Roots of s^2 + b*s + c, real or a conjugate pair. */
+export function quadraticRoots(b: number, c: number): [Cx, Cx] {
+  const disc = b * b / 4 - c;
+  const root: Cx = disc >= 0 ? [Math.sqrt(disc), 0] : [0, Math.sqrt(-disc)];
+  return [cAdd([-b / 2, 0], root), cSub([-b / 2, 0], root)];
+}
+
+/**
+ * Inverse Laplace of (alpha*s + beta) / (k * s * (s - s1) * (s - s2)) --
+ * the response of a second-order system with a first-order numerator to a
+ * step, written as a sum of residues.
+ *
+ *   f(t) = (1/k) [ beta/(s1 s2)
+ *                + (alpha s1 + beta)/(s1 (s1 - s2)) e^(s1 t)
+ *                + (alpha s2 + beta)/(s2 (s2 - s1)) e^(s2 t) ]
+ *
+ * Returns a real-valued function of t: when s1 and s2 are a conjugate pair the
+ * two exponential terms are conjugates too, so the imaginary parts cancel.
+ *
+ * Repeated roots make the residue form singular. Separating them by a relative
+ * 1e-7 is indistinguishable from the limit at any resolution that can be
+ * plotted, and avoids carrying a fourth case that nothing here exercises.
+ */
+export function stepResponseResidues(
+  alpha: number, beta: number, k: number, s1In: Cx, s2In: Cx,
+): (t: number) => number {
+  let s1 = s1In, s2 = s2In;
+  const scale = Math.max(cAbs(s1), cAbs(s2), 1e-30);
+  if (cAbs(cSub(s1, s2)) < 1e-7 * scale) {
+    s1 = cAdd(s1, [1e-7 * scale, 0]);
+    s2 = cSub(s2, [1e-7 * scale, 0]);
+  }
+  const dc = cDiv([beta, 0], cMul(s1, s2));
+  const r1 = cDiv(cAdd(cMul([alpha, 0], s1), [beta, 0]), cMul(s1, cSub(s1, s2)));
+  const r2 = cDiv(cAdd(cMul([alpha, 0], s2), [beta, 0]), cMul(s2, cSub(s2, s1)));
+  return (t: number) => (
+    dc[0]
+    + cMul(r1, cExp(cMul(s1, [t, 0])))[0]
+    + cMul(r2, cExp(cMul(s2, [t, 0])))[0]
+  ) / k;
+}

@@ -115,6 +115,12 @@ a { color: var(--accent); }
   font-variant-numeric: tabular-nums;
 }
 
+/* A class that sets `display` beats the user agent's `[hidden] { display: none }`
+   on specificity, so a control group toggled with the hidden attribute stayed
+   on screen and kept taking clicks. Every layout class that sets display needs
+   this companion rule. */
+.param-grid[hidden], .toggles[hidden], .presets[hidden] { display: none; }
+
 .param-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -402,9 +408,121 @@ a { color: var(--accent); }
    --------------------------------------------------------------------------- */
 .op-title { font-size: 1rem; margin: 0.4rem 0 0.6rem; }
 .op-title:not(:first-child) { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+/* A row whose control is a <select> lays out as a grid, not a flex line.
+   WebKit keeps a select's longest option as an effective minimum in flex
+   layout even under `min-width: 0`, so the select took the label's full width
+   and the caption beside it pushed the page sideways; minmax(0, 1fr) is what
+   actually clamps it. Caught by verify-sweep.mjs at 360px, which only started
+   running once WebKit's system libraries were installed. */
+.slider:has(select) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+/* On a phone the caption beside it costs more than it is worth: WebKit lets a
+   select's option text overflow the document even when the select's own box
+   fits, so the select gets the whole row. */
+@media (max-width: 40rem) {
+  .slider:has(select) { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
+}
+
 .slider select {
-  flex: 1; font-family: inherit; font-size: 0.82rem; padding: 0.15rem 0.3rem;
+  flex: 1 1 0; font-family: inherit; font-size: 0.82rem; padding: 0.15rem 0.3rem;
   border: 1px solid var(--rule); border-radius: 3px; background: var(--paper); color: var(--ink);
+  /* A select is as wide as its longest option unless told otherwise, which
+     pushed the page sideways on a phone. Caught by verify-interactives.mjs. */
+  min-width: 0;
+  max-width: 100%;
 }
 .readout td.op-current { font-weight: 700; color: var(--accent); }
 .readout + .readout, .readout table + table { margin-top: 0.6rem; }
+
+/* ---------------------------------------------------------------------------
+   System figures -- the device beside its signal graph
+   --------------------------------------------------------------------------- */
+
+/* One column by default. These drawings are 600-720 user units wide, so half
+   of a 46rem text column scales their 15px labels down to about 6px -- legible
+   in a screenshot, useless on a screen. A single column gives each figure
+   roughly 1:1, and wide viewports get two columns by breaking out of the
+   column instead of by shrinking the figures. */
+.sysfig {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.9rem;
+  margin: 0 0 1.3rem;
+}
+.sysfig[hidden] { display: none; }
+
+/* Two columns were tried and dropped. Side by side inside the text column the
+   figures shrink to about 320px, which is half the size they need; breaking
+   them out wider than the column leaves the tool's own border running behind
+   them, because the figures live inside that bordered panel. One column at the
+   full column width renders these drawings at roughly 1:1, which is both
+   larger than the two-up layout managed and not visibly broken. */
+
+.sysfig-panel {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.55rem 0.7rem 0.5rem;
+  background: var(--paper);
+}
+.sysfig-title {
+  font: 600 0.7rem/1.4 ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin: 0 0 0.35rem;
+}
+.sysfig-art { overflow: hidden; }
+/* On a phone the column is narrower than these drawings can survive, so the
+   figure scrolls sideways inside its panel rather than shrinking its labels
+   past reading size. Same treatment the practice diagrams already get. */
+@media (max-width: 40rem) {
+  .sysfig-art { overflow-x: auto; }
+  .sysfig-svg { min-width: 30rem; }
+}
+.sysfig-svg { display: block; width: 100%; height: auto; color: var(--ink); overflow: hidden; }
+.sysfig-panel figcaption { font-size: 0.78rem; color: var(--muted); margin-top: 0.4rem; line-height: 1.45; }
+
+/* ---- schematic primitives (src/lib/schematic.ts) ---- */
+
+.fx-svg text { font-family: 'Cambria Math', Cambria, Georgia, 'Times New Roman', serif; }
+.fx-wire, .fx-body, .fx-arc, .fx-current, .fx-force, .fx-couple, .fx-wall {
+  fill: none; stroke: currentColor; stroke-linejoin: round; stroke-linecap: round;
+}
+.fx-wire { stroke-width: 1.5; }
+.fx-body { stroke-width: 1.8; }
+.fx-current, .fx-force, .fx-arc, .fx-couple { stroke-width: 1.6; }
+.fx-wall { stroke-width: 1.3; opacity: 0.7; }
+.fx-dashed, .fx-couple { stroke-dasharray: 5 4; }
+.fx-face { fill: var(--paper); stroke: currentColor; stroke-width: 1.8; }
+.fx-hub, .fx-node, .fx-head { fill: currentColor; stroke: none; }
+.fx-sym { font-size: 15px; font-style: italic; fill: currentColor; }
+.fx-pol { font-size: 13px; font-weight: 700; fill: currentColor; }
+.fx-small { font-size: 11px; font-style: normal; fill: var(--muted); }
+.fx-val, .dd-val { font: 10.5px/1 ui-monospace, monospace; fill: var(--muted); }
+.fx-enclosure-box { fill: none; stroke: var(--muted); stroke-width: 1.1; stroke-dasharray: 4 4; opacity: 0.65; }
+.fx-enclosure-label {
+  font: 11px ui-sans-serif, system-ui, sans-serif; fill: var(--muted); opacity: 0.9;
+}
+
+/* ---- the correspondence: one symbol, lit everywhere at once ---- */
+
+.is-hot .fx-body, .is-hot .fx-face, .is-hot .fx-wire, .is-hot .fx-arc,
+.is-hot .fx-current, .is-hot .fx-force, .is-hot .fx-couple,
+.is-hot .dd-block, .is-hot .dd-sum, .is-hot .dd-fracbar { stroke: var(--accent); }
+.is-hot .fx-head, .is-hot .fx-hub, .is-hot .dd-head { fill: var(--accent); }
+.is-hot .fx-sym, .is-hot .fx-pol, .is-hot .fx-val,
+.is-hot .dd-blabel, .is-hot .dd-slabel, .is-hot .dd-val { fill: var(--accent); }
+.is-hot .fx-sym, .is-hot .dd-blabel, .is-hot .dd-slabel { font-weight: 700; }
+
+/* The same highlight reaching back out to the control that moves it. */
+.slider.is-hot, label.is-hot { color: var(--accent); }
+.slider.is-hot output { color: var(--accent); border-color: var(--accent); }
+
+/* A part the selected case does not use stays drawn, so the picture does not
+   reflow under you, but stops claiming to be part of the answer. */
+.is-off { opacity: 0.22; }

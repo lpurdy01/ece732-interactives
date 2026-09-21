@@ -1,0 +1,400 @@
+---
+// State feedback modification of a DC motor (W4L2, slides 15-24).
+//
+// The controller measures the motor's own states and feeds them back, so it
+// can cancel the feedback paths the hardware already has. The lecture works
+// three cases; all three are the same expression with two terms switched on.
+//
+//   v* = (Rp_hat - Ra) i + Ke_hat w
+//   Lp di/dt = -Reff i - Keff w      Reff = Rp - Rp_hat + Ra
+//   Jp dw/dt = Kt i - bp w - TL      Keff = Ke - Ke_hat
+//
+//   TL(s)/W(s) = -[J Lp s^2 + (Lp bp + J Reff) s + Kt Keff + bp Reff]
+//                 / (Lp s + Reff)
+//
+// Case 1 (back-EMF decoupling alone) is Keff = 0, Reff = Rp, and the numerator
+// factors into (Js + bp)(Lp s + Rp) -- the pole cancels and the whole thing
+// collapses to Js + bp, which is slide 15's result. Case 3 does the same at
+// Ra instead of Rp, which is why slide 21 says its plot is "basically the same
+// as case 1".
+//
+// The point the lecture is making, and the reason this tool exists: back-EMF
+// is a PHYSICAL state feedback gain, and it was doing real work. Kt Ke / Rp is
+// most of the motor's low-frequency disturbance rejection. Decouple it and the
+// stiffness at DC falls to bp -- the bearing drag, and nothing else. That is
+// the "much worse" on slide 17, and it is a genuine engineering trade, not a
+// mistake: you give up stiffness to get a plant whose electrical loop can be
+// tuned on its own.
+import SystemFigures from './SystemFigures.astro';
+import { stateFeedbackFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="msf">
+  <SystemFigures {...stateFeedbackFigures} />
+
+  <div class="controls">
+    <label class="slider">feedback
+      <select id="msf-case">
+        <option value="0">case 0 — unmodified motor</option>
+        <option value="1">case 1 — back-EMF decoupling only</option>
+        <option value="2">case 2 — −R̂ₚ + Rₐ only</option>
+        <option value="3" selected>case 3 — −R̂ₚ + Rₐ + decoupling</option>
+      </select>
+    </label>
+
+    <div class="param-grid" id="msf-controller">
+      <label class="slider" data-sym="Ra">R<sub>a</sub>
+        <input type="range" id="msf-ra" min="-1.3" max="1.7" step="0.001" value="0.699" />
+        <output id="msf-ra-v">5</output> Ω</label>
+      <label class="slider" data-sym="Rhat">R̂<sub>p</sub>/R<sub>p</sub>
+        <input type="range" id="msf-rhat" min="0" max="1.3" step="0.01" value="1" />
+        <output id="msf-rhat-v">1</output></label>
+      <label class="slider" data-sym="Khat">K̂<sub>e</sub>/K<sub>e</sub>
+        <input type="range" id="msf-khat" min="0" max="1.3" step="0.01" value="1" />
+        <output id="msf-khat-v">1</output></label>
+    </div>
+
+    <div class="param-grid">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="msf-rp" min="-1" max="1" step="0.001" value="-0.301" />
+        <output id="msf-rp-v">0.5</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="msf-lp" min="-4" max="-1.5" step="0.02" value="-3" />
+        <output id="msf-lp-v">1</output> mH</label>
+      <label class="slider" data-sym="J">J
+        <input type="range" id="msf-j" min="-5" max="-2" step="0.02" value="-4" />
+        <output id="msf-j-v">0.1</output> g·m²</label>
+      <label class="slider" data-sym="bp">b<sub>p</sub>
+        <input type="range" id="msf-bp" min="-6" max="-2" step="0.02" value="-5" />
+        <output id="msf-bp-v">1e-5</output> N·m·s</label>
+      <label class="slider" data-sym="K">K<sub>e</sub>=K<sub>t</sub>
+        <input type="range" id="msf-k" min="-1.3" max="0.4" step="0.01" value="-0.02" />
+        <output id="msf-k-v">0.955</output> SI</label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="msf-frf" role="img" aria-label="Dynamic stiffness of the selected case"></canvas>
+      <figcaption>selected case, against the unmodified motor</figcaption>
+    </figure>
+    <figure>
+      <canvas id="msf-all" role="img" aria-label="All four cases overlaid"></canvas>
+      <figcaption>all four cases, same axes</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="msf-readout"></div>
+</div>
+
+<script>
+  import { type Cx, cAbs, cDiv, cAdd, cSub, cMul, eigen2, type Mat2,
+           quadraticRoots } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors,
+           decades, decadeLabel } from '../lib/plot';
+
+  import { bindFigureHighlight, setFigureActive, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('msf')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const caseEl = q<HTMLSelectElement>('#msf-case');
+  const raEl = q<HTMLInputElement>('#msf-ra');
+  const rhatEl = q<HTMLInputElement>('#msf-rhat');
+  const khatEl = q<HTMLInputElement>('#msf-khat');
+  const rpEl = q<HTMLInputElement>('#msf-rp');
+  const lpEl = q<HTMLInputElement>('#msf-lp');
+  const jEl = q<HTMLInputElement>('#msf-j');
+  const bpEl = q<HTMLInputElement>('#msf-bp');
+  const kEl = q<HTMLInputElement>('#msf-k');
+  const controllerBox = q<HTMLDivElement>('#msf-controller');
+  const frfCanvas = q<HTMLCanvasElement>('#msf-frf');
+  const allCanvas = q<HTMLCanvasElement>('#msf-all');
+  const readout = q<HTMLDivElement>('#msf-readout');
+
+  const F_LO = -2;    // log10 Hz -- slide 17 starts at 0.01 Hz
+  const F_HI = 5;
+  const T_STEP = 0.01;   // N*m of load-torque step, for the droop figure
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+
+  const CASE_NAME: Record<string, string> = {
+    '0': 'unmodified',
+    '1': 'back-EMF decoupling only',
+    '2': '−R̂ₚ + Rₐ, no decoupling',
+    '3': '−R̂ₚ + Rₐ with decoupling',
+  };
+
+  interface Motor { Rp: number; Lp: number; J: number; bp: number; K: number }
+
+  /**
+   * Reff and Keff for a case. Everything else in this component is written in
+   * terms of these two numbers, which is the whole reason the four cases need
+   * only one formula.
+   */
+  function effective(which: string, m: Motor, Ra: number, rhat: number, khat: number) {
+    const usesRa = which === '2' || which === '3';
+    const decouples = which === '1' || which === '3';
+    const RpHat = usesRa ? rhat * m.Rp : 0;
+    const KeHat = decouples ? khat * m.K : 0;
+    return {
+      Reff: m.Rp - RpHat + (usesRa ? Ra : 0),
+      Keff: m.K - KeHat,
+      usesRa, decouples, RpHat, KeHat,
+    };
+  }
+
+  /** |TL/Omega| from the closed form, at s = j*2*pi*f. */
+  function dsClosed(f: number, m: Motor, Reff: number, Keff: number): number {
+    const w = 2 * Math.PI * f;
+    const num: Cx = [m.K * Keff + m.bp * Reff - m.J * m.Lp * w * w,
+                     w * (m.Lp * m.bp + m.J * Reff)];
+    return cAbs(cDiv(num, [Reff, w * m.Lp]));
+  }
+
+  /**
+   * The same thing by solving the modified state equations numerically:
+   *   (sI - A_cl) X = [0, -1/J]^T,  A_cl = [[-Reff/Lp, -Keff/Lp], [Kt/J, -bp/J]]
+   * and inverting the speed row. No knowledge of the factored numerator here,
+   * so an error in the hand algebra shows up as a disagreement.
+   */
+  function dsSolved(f: number, m: Motor, Reff: number, Keff: number): number {
+    const s: Cx = [0, 2 * Math.PI * f];
+    const a11 = cAdd(s, [Reff / m.Lp, 0]);
+    const a12: Cx = [Keff / m.Lp, 0];
+    const a21: Cx = [-m.K / m.J, 0];
+    const a22 = cAdd(s, [m.bp / m.J, 0]);
+    const b2: Cx = [-1 / m.J, 0];
+    const mul = cDiv(a21, a11);
+    const omega = cDiv(b2, cSub(a22, cMul(mul, a12)));
+    return 1 / cAbs(omega);
+  }
+
+  /** Curve of log10|DS| over the plotted band. */
+  function curveFor(m: Motor, Reff: number, Keff: number, N = 500) {
+    const out: Array<[number, number]> = [];
+    for (let n = 0; n <= N; n++) {
+      const lf = F_LO + (n / N) * (F_HI - F_LO);
+      out.push([lf, Math.log10(Math.max(dsClosed(Math.pow(10, lf), m, Reff, Keff), 1e-30))]);
+    }
+    return out;
+  }
+
+  function draw() {
+    const which = caseEl.value;
+    const m: Motor = {
+      Rp: Math.pow(10, parseFloat(rpEl.value)),
+      Lp: Math.pow(10, parseFloat(lpEl.value)),
+      J: Math.pow(10, parseFloat(jEl.value)),
+      bp: Math.pow(10, parseFloat(bpEl.value)),
+      K: Math.pow(10, parseFloat(kEl.value)),
+    };
+    const Ra = Math.pow(10, parseFloat(raEl.value));
+    const rhat = parseFloat(rhatEl.value);
+    const khat = parseFloat(khatEl.value);
+
+    q<HTMLOutputElement>('#msf-ra-v').value = sig(Ra);
+    q<HTMLOutputElement>('#msf-rhat-v').value = rhat.toFixed(2);
+    q<HTMLOutputElement>('#msf-khat-v').value = khat.toFixed(2);
+    q<HTMLOutputElement>('#msf-rp-v').value = sig(m.Rp);
+    q<HTMLOutputElement>('#msf-lp-v').value = sig(m.Lp * 1e3);
+    q<HTMLOutputElement>('#msf-j-v').value = sig(m.J * 1e3);
+    q<HTMLOutputElement>('#msf-bp-v').value = sig(m.bp, 2);
+    q<HTMLOutputElement>('#msf-k-v').value = sig(m.K);
+
+    // The controller gains mean nothing in case 0, and only Ke_hat matters in
+    // case 1, so the box is hidden rather than left there implying otherwise.
+    controllerBox.hidden = which === '0';
+
+    const colors = themeColors();
+    const eff = effective(which, m, Ra, rhat, khat);
+    const base = effective('0', m, Ra, rhat, khat);
+
+    // The figure is one drawing for all four cases: the parts a case does not
+    // use go grey rather than disappearing, so nothing jumps as you switch.
+    setFigureActive(root, { Ra: eff.usesRa, Rhat: eff.usesRa, Khat: eff.decouples });
+    setFigureValues(root, {
+      Rp: `${sig(m.Rp)} Ω`,
+      Lp: `${sig(m.Lp * 1e3)} mH`,
+      J: `${sig(m.J * 1e3)} g·m²`,
+      bp: `${sig(m.bp, 2)} N·m·s`,
+      Ra: eff.usesRa ? `${sig(Ra)} Ω` : 'not used',
+    });
+
+    /* ---------------- selected case vs the unmodified motor ---------------- */
+
+    const curve = curveFor(m, eff.Reff, eff.Keff);
+    const baseCurve = curveFor(m, base.Reff, base.Keff);
+
+    let maxRelDev = 0;
+    for (let n = 0; n <= 200; n++) {
+      const f = Math.pow(10, F_LO + (n / 200) * (F_HI - F_LO));
+      const a = dsClosed(f, m, eff.Reff, eff.Keff);
+      const b = dsSolved(f, m, eff.Reff, eff.Keff);
+      maxRelDev = Math.max(maxRelDev, Math.abs(a - b) / Math.max(b, 1e-30));
+    }
+
+    const both = curve.concat(baseCurve);
+    const yHi = Math.ceil(Math.max(...both.map(([, y]) => y)) + 0.25);
+    const yLo = Math.max(Math.floor(Math.min(...both.map(([, y]) => y)) - 0.25), yHi - 9);
+
+    const fv = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: '|T_L/Ω|', origin: false,
+    });
+
+    // Asymptotes: KtKeff/Reff + bp at DC, J*2*pi*f at the top. The second one
+    // is the same line in every case -- inertia does not care about feedback.
+    const dcNow = m.K * eff.Keff / eff.Reff + m.bp;
+    const dcBaseLine = m.K * base.Keff / base.Reff + m.bp;
+    const inertia: Array<[number, number]> = [];
+    for (let n = 0; n <= 100; n++) {
+      const lf = F_LO + (n / 100) * (F_HI - F_LO);
+      inertia.push([lf, Math.log10(m.J * 2 * Math.PI * Math.pow(10, lf))]);
+    }
+    drawPolyline(fv, [[F_LO, Math.log10(Math.abs(dcNow))], [F_HI, Math.log10(Math.abs(dcNow))]],
+                 colors.muted, 1, [2, 4]);
+    drawPolyline(fv, inertia.filter(([, y]) => y >= yLo - 1 && y <= yHi + 1),
+                 colors.series[0], 1, [2, 4]);
+    label(fv, 'KtKeff/Reff + bp', [F_LO + 0.12, Math.log10(Math.abs(dcNow)) + 0.22], colors.muted);
+    label(fv, 'J(2πf)', [F_HI - 0.12, yHi - 0.35], colors.series[0], 'right');
+
+    // The unmodified motor is data, not furniture: muted grey put it in the
+    // same visual class as the asymptotes, which is what the dashed styling
+    // already says. It gets its own colour.
+    drawPolyline(fv, baseCurve, colors.series[1], 1.8, [6, 3]);
+    label(fv, 'unmodified', [F_LO + 0.12, Math.log10(Math.abs(dcBaseLine)) + 0.22],
+          colors.series[1]);
+    drawPolyline(fv, curve, colors.accent, 2.5);
+
+    /* ---------------- all four cases together ---------------- */
+
+    const cases = ['0', '1', '2', '3'].map((id) => {
+      const e = effective(id, m, Ra, rhat, khat);
+      return { id, e, curve: curveFor(m, e.Reff, e.Keff, 400) };
+    });
+    const allPts = cases.flatMap((c) => c.curve.map(([, y]) => y));
+    const aHi = Math.ceil(Math.max(...allPts) + 0.25);
+    const aLo = Math.max(Math.floor(Math.min(...allPts) - 0.25), aHi - 9);
+
+    const av = makeView(allCanvas, { xMin: F_LO, xMax: F_HI, yMin: aLo, yMax: aHi, pad: 38 });
+    drawAxes(av, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(aLo, aHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: '|T_L/Ω|', origin: false,
+    });
+    cases.forEach((c, i) => {
+      const colour = c.id === which ? colors.accent : colors.series[i];
+      drawPolyline(av, c.curve, colour, c.id === which ? 3 : 1.5);
+      label(av, `case ${c.id}`, [F_LO + 0.15, aHi - 0.45 - i * 0.42], colour);
+    });
+
+    /* ---------------- readout ---------------- */
+
+    const dcBase = dcBaseLine;
+    const droopNow = Math.abs(T_STEP / dcNow);
+    const droopBase = Math.abs(T_STEP / dcBase);
+
+    // Closed-loop eigenvalues: over-cancelling Rp_hat drives Reff negative and
+    // the current loop goes unstable, which is the real limit on this trick.
+    const Acl: Mat2 = [-eff.Reff / m.Lp, -eff.Keff / m.Lp, m.K / m.J, -m.bp / m.J];
+    const ev = eigen2(Acl);
+    const stable = ev.real ? ev.lambda[0] < 0 && ev.lambda[1] < 0 : ev.lambda[0] < 0;
+
+    // Does the pole cancel a zero? It does exactly when Keff = 0, and then the
+    // stiffness collapses to Js + bp whatever Reff is.
+    const zeros = quadraticRoots((m.Lp * m.bp + m.J * eff.Reff) / (m.J * m.Lp),
+                                 (m.K * eff.Keff + m.bp * eff.Reff) / (m.J * m.Lp));
+    const pole = -eff.Reff / m.Lp;
+    const cancels = Math.abs(eff.Keff) < 1e-12;
+
+    const bandwidth = eff.usesRa ? Ra / (2 * Math.PI * m.Lp) : NaN;
+    const mismatch = Math.abs(m.Rp - eff.RpHat);
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>case</th>
+            <td colspan="2"><b>${CASE_NAME[which]}</b> —
+            R<sub>eff</sub> = R<sub>p</sub> − R̂<sub>p</sub> + R<sub>a</sub> =
+            <b>${sig(eff.Reff)} Ω</b>,
+            K<sub>eff</sub> = K<sub>e</sub> − K̂<sub>e</sub> =
+            <b>${sig(eff.Keff)}</b></td></tr>
+        <tr><th>stiffness at DC</th>
+            <td>${sig(Math.abs(dcNow))} N·m per rad/s</td>
+            <td>unmodified motor: ${sig(Math.abs(dcBase))} —
+            <b>${dcNow === dcBase ? 'unchanged'
+                 : Math.abs(dcNow) < Math.abs(dcBase)
+                   ? `${sig(Math.abs(dcBase / dcNow))}× worse`
+                   : `${sig(Math.abs(dcNow / dcBase))}× better`}</b></td></tr>
+        <tr><th>where that comes from</th>
+            <td colspan="2">K<sub>t</sub>K<sub>eff</sub>/R<sub>eff</sub> =
+            ${sig(m.K * eff.Keff / eff.Reff)} from back-EMF, plus b<sub>p</sub> =
+            ${sig(m.bp)} from bearing drag.
+            ${cancels
+              ? 'Back-EMF has been fully decoupled, so <b>only the bearing drag is'
+                + ' left</b> — this is the "much worse" on slide 17.'
+              : 'Back-EMF is still doing most of the work.'}</td></tr>
+        <tr><th>speed droop, ${T_STEP} N·m load step</th>
+            <td>${sig(droopNow)} rad/s</td>
+            <td>unmodified: ${sig(droopBase)} rad/s</td></tr>
+        <tr><th>high frequency</th>
+            <td colspan="2">J(2πf), identical in all four cases — inertia is not
+            something state feedback can decouple</td></tr>
+        <tr><th>zeros / pole of T<sub>L</sub>/Ω</th>
+            <td colspan="2">zeros ${Math.abs(zeros[0][1]) > 1e-12
+              ? `${sig(zeros[0][0])} ± ${sig(Math.abs(zeros[0][1]))}j`
+              : `${sig(zeros[0][0])}, ${sig(zeros[1][0])}`} rad/s;
+            pole ${sig(pole)} rad/s.
+            ${cancels
+              ? ' The numerator factors as (Js+b<sub>p</sub>)(L<sub>p</sub>s+R<sub>eff</sub>),'
+                + ' so the pole cancels and the stiffness is exactly'
+                + ' <b>Js + b<sub>p</sub></b> — cases 1 and 3 land on the same curve,'
+                + ' which is what slide 21 means.'
+              : ''}</td></tr>
+        ${eff.usesRa ? `
+        <tr><th>current-loop bandwidth</th>
+            <td colspan="2">R<sub>a</sub>/(2πL<sub>p</sub>) = ${sig(bandwidth)} Hz —
+            with exact cancellation I/I* = 1/((L<sub>p</sub>/R<sub>a</sub>)s + 1),
+            so R<sub>a</sub> <em>is</em> the bandwidth knob (slide 24)</td></tr>
+        <tr><th>robustness</th>
+            <td colspan="2">R<sub>a</sub>/|R<sub>p</sub>−R̂<sub>p</sub>| =
+            ${mismatch < 1e-12 ? '∞ (exact cancellation)' : sig(Ra / mismatch)};
+            the lecture wants R<sub>a</sub> ≫ |R<sub>p</sub>−R̂<sub>p</sub>| so the
+            loop does not depend on knowing the winding resistance</td></tr>` : ''}
+        <tr><th>closed-loop eigenvalues</th>
+            <td colspan="2">${ev.real
+              ? `${sig(ev.lambda[0])}, ${sig(ev.lambda[1])}`
+              : `${sig(ev.lambda[0])} ± ${sig(ev.im)}j`} rad/s
+            <span class="tag">${stable ? 'stable' : 'UNSTABLE'}</span>
+            ${!stable
+              ? ' — R̂<sub>p</sub> has over-cancelled the winding resistance and the'
+                + ' current loop runs away. This is the limit on the trick.'
+              : ''}</td></tr>
+        <tr><th>closed form vs state-equation solve</th>
+            <td colspan="2">max deviation <b>${maxRelDev.toExponential(1)}</b> —
+            the factored stiffness matches a numeric solve of the modified state
+            equations at every frequency plotted</td></tr>
+      </table>
+      <p class="note">
+        Back-EMF is a physical state feedback gain, and K<sub>t</sub>K<sub>e</sub>/R<sub>p</sub>
+        was most of this motor's low-frequency disturbance rejection. Decoupling it
+        buys an electrical loop you can tune on its own, and costs almost all of
+        that stiffness. Neither case is simply better — which is the reason the
+        lecture draws all of them.
+      </p>`;
+  }
+
+  [raEl, rhatEl, khatEl, rpEl, lpEl, jEl, bpEl, kEl]
+    .forEach((el) => el.addEventListener('input', draw));
+  caseEl.addEventListener('change', draw);
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

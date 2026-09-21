@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/VoltageSourceStiffness.astro';
+---
+
+<BaseLayout title="The Notch in a Voltage Source — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>The Notch in a Voltage Source</h1>
+  <p class="lede">
+    Add an output capacitor and the stiffness curve stops being monotonic. At
+    the frequency where the capacitor and the inductor branch cancel, the
+    supply is at its weakest — and the resistance that damps that notch is the
+    same resistance that costs stiffness everywhere below it, and burns the
+    heat. The load step on the right is the same story in the time domain: the
+    sag is the low-frequency asymptote, the ringing is the notch.
+  </p>
+  <Widget />
+</BaseLayout>

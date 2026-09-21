@@ -9,15 +9,19 @@
 // Also reproduces the claim on slide 7: the closed-form inverse Laplace result
 // and a numerical ODE solution land on top of each other. Both are plotted --
 // if they ever diverge, something in the derivation is wrong.
+import SystemFigures from './SystemFigures.astro';
+import { secondOrderFigures } from '../lib/figures';
 ---
 
 <div class="interactive" id="second-order">
+  <SystemFigures {...secondOrderFigures} />
+
   <div class="controls">
-    <label class="slider">mass M <input type="range" id="mass" min="0.2" max="5" step="0.05" value="1" />
+    <label class="slider" data-sym="m">mass M <input type="range" id="mass" min="0.2" max="5" step="0.05" value="1" />
       <output id="mass-v">1.00</output> kg</label>
-    <label class="slider">stiffness k <input type="range" id="stiff" min="1" max="200" step="1" value="40" />
+    <label class="slider" data-sym="k">stiffness k <input type="range" id="stiff" min="1" max="200" step="1" value="40" />
       <output id="stiff-v">40</output> N/m</label>
-    <label class="slider">damping c <input type="range" id="damp" min="0" max="40" step="0.1" value="2" />
+    <label class="slider" data-sym="c">damping c <input type="range" id="damp" min="0" max="40" step="0.1" value="2" />
       <output id="damp-v">2.0</output> N·s/m</label>
     <div class="presets">
       <button data-preset="1,40,0">undamped</button>
@@ -44,6 +48,8 @@
 <script>
   import { eigen2, type Mat2 } from '../lib/linalg';
   import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
 
   const root = document.getElementById('second-order')!;
   const massEl = root.querySelector<HTMLInputElement>('#mass')!;
@@ -102,6 +108,12 @@
     root.querySelector<HTMLOutputElement>('#mass-v')!.value = M.toFixed(2);
     root.querySelector<HTMLOutputElement>('#stiff-v')!.value = k.toFixed(0);
     root.querySelector<HTMLOutputElement>('#damp-v')!.value = c.toFixed(1);
+
+    setFigureValues(root, {
+      m: `${M.toFixed(2)} kg`,
+      k: `${k.toFixed(0)} N/m`,
+      c: `${c.toFixed(1)} N·s/m`,
+    });
 
     const wn = Math.sqrt(k / M);
     const zeta = c / (2 * Math.sqrt(k * M));
@@ -212,5 +224,6 @@
   });
   window.addEventListener('resize', draw);
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
   draw();
 </script>

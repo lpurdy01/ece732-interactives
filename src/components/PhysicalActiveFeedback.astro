@@ -12,31 +12,45 @@
 // src/lib/diagram-problems.mjs); the state equation shown is derived from it.
 import { feedbackDiagram } from '../lib/diagram-problems.mjs';
 import { diagramSvg } from '../lib/diagram-svg';
-const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'pf-diagram' });
+import { schematicSvg } from '../lib/schematic';
+import { activeFeedbackPhysical } from '../lib/figures';
+const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'sysfig-svg pf-diagram' });
+const deviceSvg = schematicSvg(activeFeedbackPhysical, {
+  className: 'sysfig-svg', ariaLabel: activeFeedbackPhysical.title,
+});
 ---
 
 <div class="interactive" id="phys-active">
-  <figure class="pf-figure">
-    <div class="dd-diagram" set:html={svg}></div>
-    <figcaption>
-      <span class="pf-key pf-key-physical">physical plant and its own feedback</span>
-      <span class="pf-key pf-key-active">controller: active state feedback</span>
-    </figcaption>
-  </figure>
+  <div class="sysfig">
+    <figure class="sysfig-panel">
+      <h3 class="sysfig-title">the device</h3>
+      <div class="sysfig-art" set:html={deviceSvg} />
+      <figcaption>The spring and the damper are already state feedback. The controller
+        adds its own gains on the same two states, in parallel with them.</figcaption>
+    </figure>
+    <figure class="sysfig-panel pf-figure">
+      <h3 class="sysfig-title">the same system as a block diagram</h3>
+      <div class="sysfig-art" set:html={svg} />
+      <figcaption>
+        <span class="pf-key pf-key-physical">physical plant and its own feedback</span>
+        <span class="pf-key pf-key-active">controller: active state feedback</span>
+      </figcaption>
+    </figure>
+  </div>
 
   <div class="controls">
     <div class="param-grid">
-      <label class="slider">M <input type="range" id="pf-M" min="0.5" max="5" step="0.05" value="1" />
+      <label class="slider" data-sym="m">M <input type="range" id="pf-M" min="0.5" max="5" step="0.05" value="1" />
         <output id="pf-M-v"></output> kg</label>
     </div>
     <div class="param-grid">
-      <label class="slider pf-physical">K<sub>p</sub> <input type="range" id="pf-Kp" min="0" max="100" step="1" value="40" />
+      <label class="slider pf-physical" data-sym="k">K<sub>p</sub> <input type="range" id="pf-Kp" min="0" max="100" step="1" value="40" />
         <output id="pf-Kp-v"></output> N/m</label>
-      <label class="slider pf-physical">C<sub>p</sub> <input type="range" id="pf-Cp" min="0" max="20" step="0.1" value="2" />
+      <label class="slider pf-physical" data-sym="c">C<sub>p</sub> <input type="range" id="pf-Cp" min="0" max="20" step="0.1" value="2" />
         <output id="pf-Cp-v"></output> N·s/m</label>
-      <label class="slider pf-active">K<sub>a</sub> <input type="range" id="pf-Ka" min="-60" max="100" step="1" value="0" />
+      <label class="slider pf-active" data-sym="Ka">K<sub>a</sub> <input type="range" id="pf-Ka" min="-60" max="100" step="1" value="0" />
         <output id="pf-Ka-v"></output> N/m</label>
-      <label class="slider pf-active">C<sub>a</sub> <input type="range" id="pf-Ca" min="-20" max="30" step="0.1" value="0" />
+      <label class="slider pf-active" data-sym="Ca">C<sub>a</sub> <input type="range" id="pf-Ca" min="-20" max="30" step="0.1" value="0" />
         <output id="pf-Ca-v"></output> N·s/m</label>
     </div>
     <div class="presets">
@@ -68,6 +82,7 @@ const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'pf-diagram
 
 <script>
   import katex from 'katex';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
   import { eigen2 } from '../lib/linalg';
   import { makeView, drawAxes, drawPolyline, themeColors } from '../lib/plot';
   import { feedbackDiagram } from '../lib/diagram-problems.mjs';
@@ -133,6 +148,12 @@ const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'pf-diagram
       root.querySelector<HTMLOutputElement>(`#${id}-v`)!.value = id === 'pf-M' ? v.toFixed(2)
         : id.includes('C') ? v.toFixed(1) : v.toFixed(0);
     });
+    setFigureValues(root, {
+      m: `${M.toFixed(2)} kg`,
+      k: `${Kp.toFixed(0)} N/m`,
+      c: `${Cp.toFixed(1)} N·s/m`,
+    });
+
     const colors = themeColors();
     const passive: Sys = { M, K: Kp, C: Cp };
     const total: Sys = { M, K: Kp + Ka, C: Cp + Ca };
@@ -268,5 +289,6 @@ const svg = diagramSvg(feedbackDiagram, { regions: false, className: 'pf-diagram
   [...ids, 'pf-locus'].forEach((id) => el(id).addEventListener('input', draw));
   window.addEventListener('resize', draw);
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
   draw();
 </script>

@@ -27,6 +27,56 @@ const week1 = [
   },
 ];
 
+const week4 = [
+  {
+    href: href('/interactives/motor-transfer-matrix/'),
+    title: 'DC Motor Transfer Functions',
+    lecture: 'W4L1',
+    blurb: 'Current makes torque, speed makes back-EMF. Both disturbance paths share ' +
+           'one numerator, and its roots ride a circle, collide and split as the winding ' +
+           'resistance moves. The closed forms are checked against a numeric solve of ' +
+           '(sI−A)⁻¹B at every frequency — the two routes the lecture derives.',
+  },
+  {
+    href: href('/interactives/motor-state-feedback/'),
+    title: "Modifying a Motor's State Feedback",
+    lecture: 'W4L2',
+    blurb: 'Back-EMF is a physical feedback gain, and it was supplying most of the ' +
+           'motor\'s low-frequency disturbance rejection. Decouple it and the stiffness ' +
+           'at DC falls to the bearing drag. All four of the lecture\'s cases are the ' +
+           'same expression with two terms switched on, drawn on one set of axes.',
+  },
+];
+
+const week3 = [
+  {
+    href: href('/interactives/dynamic-stiffness/'),
+    title: 'Dynamic Stiffness and Disturbance Rejection',
+    lecture: 'W3L1',
+    blurb: 'Disturbance per unit response, plotted log-log because it has physical ' +
+           'units. Physical R and L and the controller\'s R_a and L_a add in the same ' +
+           'place, so they lift the same part of the curve — and the step response ' +
+           'beside it has the corner frequency as its time constant.',
+  },
+  {
+    href: href('/interactives/voltage-source-stiffness/'),
+    title: 'The Notch in a Voltage Source',
+    lecture: 'W3L2',
+    blurb: 'Add the output capacitor and stiffness stops rising monotonically: there ' +
+           'is a frequency where the supply is at its weakest. Damping the notch and ' +
+           'keeping low-frequency stiffness pull against each other, and a load step ' +
+           'shows both at once — sag from R_p, ringing at the notch.',
+  },
+  {
+    href: href('/interactives/eigenvalue-migration/'),
+    title: 'Eigenvalue Migration with Load',
+    lecture: 'W3L2',
+    blurb: 'The load sits inside A, so the poles move with whatever is plugged in. ' +
+           'Switch the same plot to a root locus of a gain and watch it behave ' +
+           'differently — which is the point the lecture makes twice.',
+  },
+];
+
 const week2 = [
   {
     href: href('/interactives/diagram-decomposition/'),
@@ -61,6 +111,28 @@ const week2 = [
     Tools for building intuition, grouped by the week they support. Everything runs in
     the browser.
   </p>
+
+  <h2>Week 4: The DC motor, and modifying its feedback</h2>
+  <ul class="card-list">
+    {week4.map((item) => (
+      <li>
+        <a href={item.href}><h2>{item.title}</h2></a>
+        <p class="lecture-ref">{item.lecture}</p>
+        <p>{item.blurb}</p>
+      </li>
+    ))}
+  </ul>
+
+  <h2>Week 3: Disturbance rejection and dynamic stiffness</h2>
+  <ul class="card-list">
+    {week3.map((item) => (
+      <li>
+        <a href={item.href}><h2>{item.title}</h2></a>
+        <p class="lecture-ref">{item.lecture}</p>
+        <p>{item.blurb}</p>
+      </li>
+    ))}
+  </ul>
 
   <h2>Week 2: State block diagrams, physical feedback, nonlinear models</h2>
   <ul class="card-list">

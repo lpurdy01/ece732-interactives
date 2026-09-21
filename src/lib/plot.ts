@@ -79,6 +79,13 @@ export function themeColors() {
 export function drawAxes(view: View, opts: {
   xLabel?: string; yLabel?: string;
   xTicks?: number[]; yTicks?: number[];
+  /** Tick text, when the world coordinate is not the number to show. A log
+   *  plot works in log10 units, so world 3 has to print as 1e3. */
+  xTickLabel?: (v: number) => string;
+  yTickLabel?: (v: number) => string;
+  /** Draw the x=0 / y=0 lines. False on a log plot, where the origin is
+   *  the decade 10^0 and a heavy line through it means nothing. */
+  origin?: boolean;
 } = {}) {
   const { ctx } = view;
   const c = themeColors();
@@ -94,7 +101,7 @@ export function drawAxes(view: View, opts: {
     ctx.beginPath(); ctx.moveTo(px, 8); ctx.lineTo(px, view.height - 8); ctx.stroke();
     ctx.globalAlpha = 1;
     ctx.textAlign = 'center';
-    ctx.fillText(String(tx), px, view.height - 10);
+    ctx.fillText(opts.xTickLabel ? opts.xTickLabel(tx) : String(tx), px, view.height - 10);
   }
   for (const ty of opts.yTicks ?? []) {
     const py = view.y(ty);
@@ -102,25 +109,30 @@ export function drawAxes(view: View, opts: {
     ctx.beginPath(); ctx.moveTo(8, py); ctx.lineTo(view.width - 8, py); ctx.stroke();
     ctx.globalAlpha = 1;
     ctx.textAlign = 'left';
-    ctx.fillText(String(ty), 10, py - 3);
+    ctx.fillText(opts.yTickLabel ? opts.yTickLabel(ty) : String(ty), 10, py - 3);
   }
 
   // Origin lines drawn darker than the grid.
-  ctx.strokeStyle = c.muted;
-  ctx.globalAlpha = 0.75;
-  ctx.beginPath();
-  ctx.moveTo(8, view.y(0)); ctx.lineTo(view.width - 8, view.y(0));
-  ctx.moveTo(view.x(0), 8); ctx.lineTo(view.x(0), view.height - 8);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
+  const origin = opts.origin ?? true;
+  if (origin) {
+    ctx.strokeStyle = c.muted;
+    ctx.globalAlpha = 0.75;
+    ctx.beginPath();
+    ctx.moveTo(8, view.y(0)); ctx.lineTo(view.width - 8, view.y(0));
+    ctx.moveTo(view.x(0), 8); ctx.lineTo(view.x(0), view.height - 8);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
 
   if (opts.xLabel) {
     ctx.textAlign = 'right';
-    ctx.fillText(opts.xLabel, view.width - 10, view.y(0) - 6);
+    ctx.fillText(opts.xLabel, view.width - 10, origin ? view.y(0) - 6 : view.height - 24);
   }
   if (opts.yLabel) {
-    ctx.textAlign = 'left';
-    ctx.fillText(opts.yLabel, view.x(0) + 6, 16);
+    // Without an origin line to hang from, the label would sit on top of the
+    // left-hand tick text, so it moves to the free corner instead.
+    ctx.textAlign = origin ? 'left' : 'right';
+    ctx.fillText(opts.yLabel, origin ? view.x(0) + 6 : view.width - 10, 16);
   }
   ctx.restore();
 }
@@ -172,4 +184,26 @@ export function label(view: View, text: string, at: [number, number],
   ctx.textAlign = align;
   ctx.fillText(text, view.x(at[0]), view.y(at[1]));
   ctx.restore();
+}
+
+/**
+ * Integer decade exponents covering [lo, hi], given in log10 units.
+ *
+ * Log plots in this course are drawn in log10 world coordinates -- the lecture
+ * plots dynamic stiffness on log-log axes with physical units, so there is no
+ * dB convention to fall back on and the decade is the natural gridline.
+ */
+export function decades(lo: number, hi: number): number[] {
+  const out: number[] = [];
+  for (let e = Math.ceil(lo); e <= Math.floor(hi); e++) out.push(e);
+  return out;
+}
+
+/** Tick text for a log10 exponent: -1 -> "0.1", 0 -> "1", 3 -> "1e3". */
+export function decadeLabel(exponent: number): string {
+  if (exponent === 0) return '1';
+  if (exponent === 1) return '10';
+  if (exponent === -1) return '0.1';
+  if (exponent === -2) return '0.01';
+  return `1e${exponent}`;
 }

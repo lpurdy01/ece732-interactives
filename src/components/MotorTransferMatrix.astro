@@ -1,0 +1,398 @@
+---
+// DC motor transfer functions, both routes (W4L1, slides 16-27).
+//
+// The motor is the first system in this course whose two states feed each
+// other: current makes torque, speed makes back-EMF, and that cross-coupling
+// is what all the interesting behaviour comes from.
+//
+//   [ i' ]   [ -Rp/Lp  -Ke/Lp ] [ i ]   [ 1/Lp   0    ] [ V  ]
+//   [ w' ] = [  Kt/J   -bp/J  ] [ w ] + [ 0     -1/J  ] [ TL ]
+//
+// The lecture derives the transfer functions twice -- once by substituting the
+// loop and Newton equations into each other, and once as X = (sI-A)^-1 Btot U
+// -- and then notes they are "the same as what was derived using direct
+// substitution". Here the closed forms are plotted and a numeric complex solve
+// of (sI-A)X = Btot U runs beside them at every frequency, so that claim is
+// checked rather than asserted.
+//
+// Both dynamic stiffnesses share the same numerator
+//
+//   D(s) = J Lp s^2 + (Lp bp + J Rp) s + Ke Kt + Rp bp
+//
+// and that is the object worth playing with. Its roots are the ZEROS of the
+// stiffness, and they are real and equal at Rp = (Lp bp + 2*sqrt(J Lp Ke Kt))/J
+// -- the three cases slide 25 annotates (complex, real and equal, far apart)
+// are one slider apart here.
+import SystemFigures from './SystemFigures.astro';
+import { motorFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="mtm">
+  <SystemFigures {...motorFigures} />
+
+  <div class="controls">
+    <label class="slider">disturbance
+      <select id="mtm-mode">
+        <option value="volt">voltage noise → speed (V/Ω)</option>
+        <option value="torque">load torque → speed (T_L/Ω)</option>
+      </select>
+    </label>
+    <div class="param-grid">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="mtm-rp" min="-1" max="2" step="0.001" value="-0.301" />
+        <output id="mtm-rp-v">0.5</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="mtm-lp" min="-4" max="-1.5" step="0.02" value="-3" />
+        <output id="mtm-lp-v">1</output> mH</label>
+      <label class="slider" data-sym="J">J
+        <input type="range" id="mtm-j" min="-5" max="-2" step="0.02" value="-4" />
+        <output id="mtm-j-v">0.1</output> g·m²</label>
+      <label class="slider" data-sym="bp">b<sub>p</sub>
+        <input type="range" id="mtm-bp" min="-6" max="-2" step="0.02" value="-5" />
+        <output id="mtm-bp-v">1e-5</output> N·m·s</label>
+      <label class="slider" data-sym="K">K<sub>e</sub>=K<sub>t</sub>
+        <input type="range" id="mtm-k" min="-1.3" max="0.4" step="0.01" value="-0.02" />
+        <output id="mtm-k-v">0.955</output> SI</label>
+    </div>
+    <div class="presets">
+      <button data-rp="-0.301">lecture example</button>
+      <button data-rp="equal">R<sub>p</sub> for equal roots</button>
+      <button data-rp="2">far apart</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="mtm-frf" role="img" aria-label="Dynamic stiffness against frequency, log-log"></canvas>
+      <figcaption id="mtm-cap">dynamic stiffness |V/Ω| [V per rad/s]</figcaption>
+    </figure>
+    <figure>
+      <canvas id="mtm-zeros" role="img" aria-label="Zero locations as winding resistance varies"></canvas>
+      <figcaption>zeros of D(s) as R<sub>p</sub> varies</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="mtm-readout"></div>
+</div>
+
+<script>
+  import { type Cx, cAdd, cSub, cMul, cDiv, cAbs, quadraticRoots } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors,
+           decades, decadeLabel } from '../lib/plot';
+
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('mtm')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const modeEl = q<HTMLSelectElement>('#mtm-mode');
+  const rpEl = q<HTMLInputElement>('#mtm-rp');
+  const lpEl = q<HTMLInputElement>('#mtm-lp');
+  const jEl = q<HTMLInputElement>('#mtm-j');
+  const bpEl = q<HTMLInputElement>('#mtm-bp');
+  const kEl = q<HTMLInputElement>('#mtm-k');
+  const frfCanvas = q<HTMLCanvasElement>('#mtm-frf');
+  const zeroCanvas = q<HTMLCanvasElement>('#mtm-zeros');
+  const readout = q<HTMLDivElement>('#mtm-readout');
+  const caption = q<HTMLElement>('#mtm-cap');
+
+  const F_LO = -1;   // log10 Hz
+  const F_HI = 5;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+
+  interface Motor { Rp: number; Lp: number; J: number; bp: number; K: number }
+
+  /** D(s) = J Lp s^2 + (Lp bp + J Rp) s + Ke Kt + Rp bp, at s = j*2*pi*f. */
+  function dPoly(f: number, m: Motor): Cx {
+    const w = 2 * Math.PI * f;
+    return [m.K * m.K + m.Rp * m.bp - m.J * m.Lp * w * w,
+            w * (m.Lp * m.bp + m.J * m.Rp)];
+  }
+
+  /**
+   * The two closed-form stiffnesses, straight off slides 24 and 26.
+   *   voltage noise: V/Omega  = D(s)/Kt          -- zeros only, no poles
+   *   load torque:   TL/Omega = -D(s)/(Lp s + Rp) -- zeros plus one pole
+   */
+  function dsClosed(f: number, m: Motor, mode: string): number {
+    const d = dPoly(f, m);
+    if (mode === 'volt') return cAbs(d) / m.K;
+    return cAbs(cDiv(d, [m.Rp, 2 * Math.PI * f * m.Lp]));
+  }
+
+  /**
+   * The same numbers by the state-space route: solve (sI - A) X = Btot U
+   * numerically for the speed row, and invert it.
+   *
+   * Nothing here uses D(s). If the algebra on slides 22-23 were wrong, the two
+   * would part company -- which is exactly the claim the lecture makes when it
+   * says the matrix route gives "the same as direct substitution".
+   */
+  function dsSolved(f: number, m: Motor, mode: string): number {
+    const s: Cx = [0, 2 * Math.PI * f];
+    // sI - A, row-major
+    const a11 = cAdd(s, [m.Rp / m.Lp, 0]);
+    const a12: Cx = [m.K / m.Lp, 0];
+    const a21: Cx = [-m.K / m.J, 0];
+    const a22 = cAdd(s, [m.bp / m.J, 0]);
+    // Btot column for the chosen disturbance.
+    const b1: Cx = mode === 'volt' ? [1 / m.Lp, 0] : [0, 0];
+    const b2: Cx = mode === 'volt' ? [0, 0] : [-1 / m.J, 0];
+    // Eliminate the current row, solve for Omega.
+    const mul = cDiv(a21, a11);
+    const omega = cDiv(cSub(b2, cMul(mul, b1)), cSub(a22, cMul(mul, a12)));
+    return 1 / cAbs(omega);
+  }
+
+  /** Roots of D(s), i.e. the zeros both stiffnesses share. */
+  const zerosOf = (m: Motor): [Cx, Cx] =>
+    quadraticRoots((m.Lp * m.bp + m.J * m.Rp) / (m.J * m.Lp),
+                   (m.K * m.K + m.Rp * m.bp) / (m.J * m.Lp));
+
+  /** Rp at which those roots are real and equal (slide 24). */
+  const rpEqualRoots = (m: Motor) =>
+    (m.Lp * m.bp + 2 * Math.sqrt(m.J * m.Lp * m.K * m.K)) / m.J;
+
+  function draw() {
+    const mode = modeEl.value;
+    const m: Motor = {
+      Rp: Math.pow(10, parseFloat(rpEl.value)),
+      Lp: Math.pow(10, parseFloat(lpEl.value)),
+      J: Math.pow(10, parseFloat(jEl.value)),
+      bp: Math.pow(10, parseFloat(bpEl.value)),
+      K: Math.pow(10, parseFloat(kEl.value)),
+    };
+
+    q<HTMLOutputElement>('#mtm-rp-v').value = sig(m.Rp);
+    q<HTMLOutputElement>('#mtm-lp-v').value = sig(m.Lp * 1e3);
+    q<HTMLOutputElement>('#mtm-j-v').value = sig(m.J * 1e3);
+    q<HTMLOutputElement>('#mtm-bp-v').value = sig(m.bp, 2);
+    q<HTMLOutputElement>('#mtm-k-v').value = sig(m.K);
+
+    setFigureValues(root, {
+      Rp: `${sig(m.Rp)} Ω`,
+      Lp: `${sig(m.Lp * 1e3)} mH`,
+      J: `${sig(m.J * 1e3)} g·m²`,
+      bp: `${sig(m.bp, 2)} N·m·s`,
+    });
+
+    const colors = themeColors();
+    const wn = Math.sqrt((m.K * m.K + m.Rp * m.bp) / (m.J * m.Lp));
+    const fr = wn / (2 * Math.PI);
+    const rpEqual = rpEqualRoots(m);
+    const zeros = zerosOf(m);
+    const pole = -m.Rp / m.Lp;
+
+    caption.innerHTML = mode === 'volt'
+      ? 'dynamic stiffness |V/Ω| [V per rad/s]'
+      : 'dynamic stiffness |T<sub>L</sub>/Ω| [N·m per rad/s]';
+
+    /* ---------------- dynamic stiffness, log-log ---------------- */
+
+    const curve: Array<[number, number]> = [];
+    const lowAsym: Array<[number, number]> = [];
+    const highAsym: Array<[number, number]> = [];
+    let maxRelDev = 0;
+    const N = 700;   // dense: the notch is narrow when the zeros are complex
+    // Low-frequency value: D(0) over Kt, or over Rp.
+    const dcMag = mode === 'volt'
+      ? (m.K * m.K + m.Rp * m.bp) / m.K
+      : (m.K * m.K + m.Rp * m.bp) / m.Rp;
+    for (let n = 0; n <= N; n++) {
+      const lf = F_LO + (n / N) * (F_HI - F_LO);
+      const f = Math.pow(10, lf);
+      const mag = dsClosed(f, m, mode);
+      const check = dsSolved(f, m, mode);
+      maxRelDev = Math.max(maxRelDev, Math.abs(mag - check) / Math.max(check, 1e-30));
+      curve.push([lf, Math.log10(Math.max(mag, 1e-30))]);
+      lowAsym.push([lf, Math.log10(dcMag)]);
+      // High frequency: J Lp w^2 / Kt, or J w -- inertia, either way.
+      const w = 2 * Math.PI * f;
+      highAsym.push([lf, Math.log10(mode === 'volt' ? m.J * m.Lp * w * w / m.K : m.J * w)]);
+    }
+
+    const yHi = Math.ceil(Math.max(...curve.map(([, y]) => y)) + 0.25);
+    const yLo = Math.max(Math.floor(Math.min(...curve.map(([, y]) => y)) - 0.25), yHi - 8);
+
+    const fv = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: mode === 'volt' ? '|V/Ω|' : '|T_L/Ω|', origin: false,
+    });
+
+    const clip = (pts: Array<[number, number]>) =>
+      pts.filter(([, y]) => y >= yLo - 1 && y <= yHi + 1);
+    drawPolyline(fv, lowAsym, colors.muted, 1, [2, 4]);
+    drawPolyline(fv, clip(highAsym), colors.series[0], 1, [2, 4]);
+    label(fv, mode === 'volt' ? 'KeKt/Kt' : 'KtKe/Rp + bp',
+          [F_LO + 0.12, Math.log10(dcMag) + 0.22], colors.muted);
+    label(fv, mode === 'volt' ? 'JLp(2πf)²/Kt' : 'J(2πf)',
+          [F_HI - 0.12, yHi - 0.35], colors.series[0], 'right');
+
+    const lfr = Math.log10(fr);
+    if (lfr > F_LO && lfr < F_HI) {
+      drawPolyline(fv, [[lfr, yLo], [lfr, yHi]], colors.muted, 1, [4, 3]);
+      label(fv, `fr ${sig(fr)} Hz`, [lfr + 0.08, yLo + 0.3], colors.ink);
+    }
+    drawPolyline(fv, curve, colors.accent, 2.5);
+
+    /* ---------------- where the zeros go as Rp varies ---------------- */
+
+    const SWEEP = 260;
+    const branchA: Array<[number, number]> = [];
+    const branchB: Array<[number, number]> = [];
+    let prev: [Cx, Cx] | null = null;
+    const rpLo = parseFloat(rpEl.min), rpHi = parseFloat(rpEl.max);
+    for (let n = 0; n <= SWEEP; n++) {
+      const Rp = Math.pow(10, rpLo + (n / SWEEP) * (rpHi - rpLo));
+      let [z1, z2] = zerosOf({ ...m, Rp });
+      if (prev) {
+        const keep = cAbs(cSub(z1, prev[0])) + cAbs(cSub(z2, prev[1]));
+        const swap = cAbs(cSub(z2, prev[0])) + cAbs(cSub(z1, prev[1]));
+        if (swap < keep) { const t = z1; z1 = z2; z2 = t; }
+      }
+      branchA.push([z1[0], z1[1]]);
+      branchB.push([z2[0], z2[1]]);
+      prev = [z1, z2];
+    }
+
+    // Same framing rule as the Week 3 migration plot: size the window to the
+    // complex part of the locus. Once the roots split, one of them runs off
+    // towards -Rp/Lp and would otherwise flatten everything else.
+    const cloud = branchA.concat(branchB, zeros.map(([re, im]) => [re, im] as [number, number]));
+    const osc = cloud.filter(([, im]) => Math.abs(im) > 1e-12);
+    const scale = Math.max(
+      ...(osc.length ? osc.map(([re, im]) => Math.max(Math.abs(re), Math.abs(im)))
+                     : cloud.map(([re]) => Math.abs(re))),
+      1e-9,
+    );
+    const xMin = -2.4 * scale, xMax = 0.3 * scale, yMax = 1.25 * scale;
+
+    const zv = makeView(zeroCanvas, { xMin, xMax, yMin: -yMax, yMax, equalAspect: true, pad: 38 });
+    drawAxes(zv, {
+      xTicks: [0.75, 0.5, 0.25].map((n) => +(n * xMin).toPrecision(2)),
+      yTicks: [-0.6, 0.6].map((n) => +(n * yMax).toPrecision(2)),
+      xTickLabel: (v) => sig(v, 2), yTickLabel: (v) => sig(v, 2),
+      xLabel: 'Re [rad/s]', yLabel: 'Im [rad/s]',
+    });
+    drawPolyline(zv, branchA, colors.series[0], 2);
+    drawPolyline(zv, branchB, colors.series[2], 2);
+
+    // The split point: where the two branches meet on the real axis.
+    const [ze] = zerosOf({ ...m, Rp: rpEqual });
+    zv.ctx.save();
+    zv.ctx.strokeStyle = colors.muted;
+    zv.ctx.lineWidth = 1.5;
+    zv.ctx.beginPath();
+    zv.ctx.arc(zv.x(ze[0]), zv.y(0), 5, 0, 2 * Math.PI);
+    zv.ctx.stroke();
+    zv.ctx.restore();
+    label(zv, `real & equal at Rp = ${sig(rpEqual)} Ω`, [xMin * 0.97, yMax * 0.86], colors.muted);
+
+    // Current zeros, as circles -- the stiffness plot's notch lives here.
+    zv.ctx.save();
+    zv.ctx.strokeStyle = colors.accent;
+    zv.ctx.lineWidth = 2.5;
+    for (const [re, im] of zeros) {
+      zv.ctx.beginPath();
+      zv.ctx.arc(zv.x(re), zv.y(im), 6, 0, 2 * Math.PI);
+      zv.ctx.stroke();
+    }
+    zv.ctx.restore();
+
+    /* ---------------- readout ---------------- */
+
+    const complexZeros = Math.abs(zeros[0][1]) > 1e-12;
+    // The zeros move like a square root near the double root, so no stepped
+    // slider lands on it exactly and testing for exactly-equal roots would
+    // never fire. What is meaningful is how close Rp is to the value that
+    // produces them.
+    const nearEqual = Math.abs(m.Rp / rpEqual - 1) < 0.01;
+    const character = nearEqual
+      ? `real and equal, to within a slider step — R<sub>p</sub> is within 1% of
+         ${sig(rpEqual)} Ω and the notch has just closed`
+      : complexZeros
+        ? `complex pair — R<sub>p</sub> is below ${sig(rpEqual)} Ω, so the stiffness
+           has a notch at f<sub>r</sub>`
+        : 'real and far apart — no notch, two separate corners';
+
+    const zeroText = complexZeros
+      ? `${sig(zeros[0][0])} ± ${sig(Math.abs(zeros[0][1]))}j`
+      : `${sig(zeros[0][0])}, ${sig(zeros[1][0])}`;
+
+    const poleRow = mode === 'volt'
+      ? `none — V/Ω is D(s)/K<sub>t</sub>, a polynomial. That is why it looks like
+         a second-order Bode plot turned upside down.`
+      : `${sig(pole)} rad/s = −R<sub>p</sub>/L<sub>p</sub>, the only pole`;
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>D(s) = JL<sub>p</sub>s² + (L<sub>p</sub>b<sub>p</sub>+JR<sub>p</sub>)s
+                + K<sub>e</sub>K<sub>t</sub>+R<sub>p</sub>b<sub>p</sub></th>
+            <td colspan="2">${sig(m.J * m.Lp)} s² + ${sig(m.Lp * m.bp + m.J * m.Rp)} s
+            + ${sig(m.K * m.K + m.Rp * m.bp)}</td></tr>
+        <tr><th>zeros of the stiffness</th>
+            <td colspan="2">${zeroText} rad/s <span class="tag">${complexZeros ? 'complex' : 'real'}</span><br>${character}</td></tr>
+        <tr><th>poles of the stiffness</th><td colspan="2">${poleRow}</td></tr>
+        <tr><th>f<sub>r</sub> = √((K<sub>e</sub>K<sub>t</sub>+R<sub>p</sub>b<sub>p</sub>)/(JL<sub>p</sub>))/2π</th>
+            <td>${sig(fr)} Hz</td><td>ωₙ = ${sig(wn)} rad/s</td></tr>
+        <tr><th>R<sub>p</sub> for equal roots</th>
+            <td colspan="2">(L<sub>p</sub>b<sub>p</sub> + 2√(JL<sub>p</sub>K<sub>e</sub>K<sub>t</sub>))/J
+            = <b>${sig(rpEqual)} Ω</b>, against R<sub>p</sub> = ${sig(m.Rp)} Ω now</td></tr>
+        <tr><th>stiffness at DC</th>
+            <td colspan="2">${sig(dcMag)} ${mode === 'volt' ? 'V per rad/s' : 'N·m per rad/s'}
+            ${mode === 'torque'
+              ? `= K<sub>t</sub>K<sub>e</sub>/R<sub>p</sub> + b<sub>p</sub>. Back-EMF
+                 supplies ${sig(100 * (m.K * m.K / m.Rp) / dcMag)}% of it and the
+                 bearing drag the rest — worth remembering before Week 4's
+                 second lecture throws the back-EMF term away.`
+              : ''}</td></tr>
+        <tr><th>transfer function matrix</th>
+            <td colspan="2">H<sub>IV</sub> = (Js+b<sub>p</sub>)/D,
+            H<sub>I,TL</sub> = K<sub>e</sub>/D,
+            H<sub>ΩV</sub> = K<sub>t</sub>/D,
+            H<sub>Ω,TL</sub> = −(L<sub>p</sub>s+R<sub>p</sub>)/D.
+            The off-diagonal entries are equal here only because K<sub>e</sub> = K<sub>t</sub>
+            in SI units.</td></tr>
+        <tr><th>substitution vs (sI−A)⁻¹B</th>
+            <td colspan="2">max deviation <b>${maxRelDev.toExponential(1)}</b> over
+            ${N + 1} frequencies — the closed form and a numeric solve of the state
+            equations agree, which is the claim slide 23 makes</td></tr>
+      </table>
+      <p class="note">
+        The right-hand plot is the zeros of D(s) as R<sub>p</sub> sweeps its whole
+        range. K<sub>e</sub>K<sub>t</sub> nearly fixes their product, so they ride a
+        circle of radius ωₙ until they collide on the real axis and split — below
+        that resistance the motor rings, above it there are simply two corners.
+      </p>`;
+  }
+
+  [rpEl, lpEl, jEl, bpEl, kEl].forEach((el) => el.addEventListener('input', draw));
+  modeEl.addEventListener('change', draw);
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const want = btn.dataset.rp!;
+      if (want === 'equal') {
+        const m: Motor = {
+          Rp: 1, Lp: Math.pow(10, parseFloat(lpEl.value)), J: Math.pow(10, parseFloat(jEl.value)),
+          bp: Math.pow(10, parseFloat(bpEl.value)), K: Math.pow(10, parseFloat(kEl.value)),
+        };
+        const target = Math.log10(rpEqualRoots(m));
+        rpEl.value = String(Math.min(Math.max(target, parseFloat(rpEl.min)), parseFloat(rpEl.max)));
+      } else {
+        rpEl.value = want;
+      }
+      draw();
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

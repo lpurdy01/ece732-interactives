@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/DynamicStiffness.astro';
+---
+
+<BaseLayout title="Dynamic Stiffness and Disturbance Rejection — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Dynamic Stiffness and Disturbance Rejection</h1>
+  <p class="lede">
+    How well a regulated current source shrugs off a disturbance is one number
+    per frequency: the disturbance it takes to move the output by one unit.
+    That is a frequency response function with physical units, so it is plotted
+    log-log rather than in dB. Resistance and inductance bought in hardware and
+    the same gains bought in a controller land in the same place in the
+    equation — and lift the same part of the curve.
+  </p>
+  <Widget />
+</BaseLayout>

@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/MotorTransferMatrix.astro';
+---
+
+<BaseLayout title="DC Motor Transfer Functions — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>DC Motor Transfer Functions</h1>
+  <p class="lede">
+    The first system in this course whose two states feed each other: current
+    makes torque, speed makes back-EMF. Both disturbance paths share one
+    numerator, <code>D(s)</code>, and its roots are the zeros of the stiffness.
+    Move the winding resistance and watch them ride a circle, collide, and
+    split — the three cases the lecture annotates are one slider apart.
+  </p>
+  <Widget />
+</BaseLayout>

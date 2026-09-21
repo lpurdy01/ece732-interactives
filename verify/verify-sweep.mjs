@@ -232,7 +232,10 @@ async function sweepSliders(browser, origin, report, tag, route, canvases, extra
 
 async function sweepLayout(browser, origin, report, tag) {
   const routes = ['/', '/interactives/', '/interactives/diagram-decomposition/',
-                  '/interactives/physical-active-feedback/', '/interactives/operating-point-linearization/'];
+                  '/interactives/physical-active-feedback/', '/interactives/operating-point-linearization/',
+                  '/interactives/dynamic-stiffness/', '/interactives/voltage-source-stiffness/',
+                  '/interactives/eigenvalue-migration/', '/interactives/motor-transfer-matrix/',
+                  '/interactives/motor-state-feedback/'];
   for (const [w, h] of [[360, 780], [768, 1024], [1440, 900]]) {
     for (const scheme of ['light', 'dark']) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: scheme });
@@ -292,6 +295,55 @@ try {
       });
     await sweepSliders(browser, server.origin, report, tag, '/interactives/eigenvector-geometry/', ['#eig-canvas']);
     await sweepSliders(browser, server.origin, report, tag, '/interactives/second-order-response/', ['#splane', '#response']);
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/dynamic-stiffness/', ['#ds-frf', '#ds-step']);
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/voltage-source-stiffness/', ['#vs-frf', '#vs-step']);
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/motor-transfer-matrix/',
+                       ['#mtm-frf', '#mtm-zeros'], async (page, inspect) => {
+      for (const mode of ['torque', 'volt']) {
+        await page.selectOption('#mtm-mode', mode);
+        await page.waitForTimeout(60);
+        await inspect(`mode=${mode}`);
+      }
+    });
+    // Every feedback case, since each one changes which terms survive.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/motor-state-feedback/',
+                       ['#msf-frf', '#msf-all'], async (page, inspect) => {
+      for (const c of ['0', '1', '2', '3']) {
+        await page.selectOption('#msf-case', c);
+        await page.waitForTimeout(60);
+        await inspect(`case=${c}`);
+        for (const [sel, v] of [['#msf-ra', -1.3], ['#msf-ra', 1.7],
+                                ['#msf-rhat', 0], ['#msf-rhat', 1.3],
+                                ['#msf-khat', 0], ['#msf-khat', 1.3]]) {
+          await setRange(page, sel, v);
+          await page.waitForTimeout(25);
+          await inspect(`case=${c} ${sel}=${v}`);
+        }
+        await setRange(page, '#msf-ra', 0.699);
+        await setRange(page, '#msf-rhat', 1);
+        await setRange(page, '#msf-khat', 1);
+      }
+    });
+    // Both plot modes, because they swap which sliders are live and which
+    // system is being drawn -- a sweep of the default mode alone would leave
+    // the root-locus half unvisited.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/eigenvalue-migration/',
+                       ['#evm-splane', '#evm-step'], async (page, inspect) => {
+      for (const mode of ['locus', 'evm']) {
+        await page.selectOption('#evm-mode', mode);
+        await page.waitForTimeout(60);
+        await inspect(`mode=${mode}`);
+        for (const s of await page.locator('main input[type="range"]:not([hidden])')
+                                  .evaluateAll((els) => els.map((e) => ({ id: e.id, min: e.min, max: e.max, value: e.value })))) {
+          for (const v of [s.min, s.max]) {
+            await setRange(page, `#${s.id}`, v);
+            await page.waitForTimeout(25);
+            await inspect(`mode=${mode} ${s.id}=${v}`);
+          }
+          await setRange(page, `#${s.id}`, s.value);
+        }
+      }
+    });
     await sweepLayout(browser, server.origin, report, tag);
     await browser.close();
   }

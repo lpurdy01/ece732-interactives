@@ -1,0 +1,513 @@
+---
+// Eigenvalue migration with load (W3L2, slides 11-14).
+//
+// The voltage-source supply has two states, and the load resistance sits
+// inside the A matrix rather than beside it:
+//
+//   [eo']   [ -1/(Req Cp)   1/Cp  ] [eo]   [ 0    ]
+//   [ i' ] = [ -1/Lp       -Rp/Lp ] [ i ] + [ 1/Lp ] ei
+//
+// so the poles are a function of what is plugged in. Sweeping Req and plotting
+// where the eigenvalues go is an EIGENVALUE MIGRATION plot, and the lecture is
+// emphatic (slide 14) that it is not a root locus: a root locus varies a
+// controller gain, an EVM plot varies a physical parameter, and here the
+// dependence on that parameter is reciprocal rather than linear.
+//
+// Both are drawable here, on the same axes and with the same code path, which
+// is the quickest way to see that they answer different questions. The root
+// locus example is the lecture's own sidebar plant, 1/(s^2 + a s + b) behind a
+// gain K, and it is a DIFFERENT SYSTEM -- nothing about the supply changes
+// when that mode is selected.
+//
+// The right-hand panel is the consequence: the step response at the current
+// load, drawn over faint traces at the ends of the load range. That spread is
+// what "eigenvalue migration with load variation is unacceptable" means when
+// you have to ship the thing.
+import SystemFigures from './SystemFigures.astro';
+import { migrationFigures, locusFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="evm">
+  <SystemFigures {...migrationFigures} id="evm-fig-supply" />
+  <SystemFigures {...locusFigures} id="evm-fig-locus" hidden />
+
+  <div class="controls">
+    <label class="slider">plot
+      <select id="evm-mode">
+        <option value="evm">eigenvalue migration (vary R_eq)</option>
+        <option value="locus">root locus (vary gain K)</option>
+      </select>
+    </label>
+
+    <div class="param-grid" id="evm-supply-params">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="evm-rp" min="-1.3" max="1" step="0.02" value="-1" />
+        <output id="evm-rp-v">0.100</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="evm-lp" min="-4" max="-2" step="0.02" value="-3" />
+        <output id="evm-lp-v">1.00</output> mH</label>
+      <label class="slider" data-sym="Cp">C<sub>p</sub>
+        <input type="range" id="evm-cp" min="-6" max="-3.3" step="0.02" value="-4.6" />
+        <output id="evm-cp-v">25.1</output> µF</label>
+      <label class="slider" data-sym="Req">R<sub>eq</sub>
+        <input type="range" id="evm-req" min="-0.5" max="3" step="0.02" value="1" />
+        <output id="evm-req-v">10.0</output> Ω</label>
+    </div>
+
+    <div class="param-grid" id="evm-locus-params" hidden>
+      <label class="slider" data-sym="K">gain K
+        <input type="range" id="evm-k" min="0" max="2000" step="5" value="200" />
+        <output id="evm-k-v">200</output></label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="evm-splane" role="img" aria-label="Root locations in the complex plane"></canvas>
+      <figcaption id="evm-cap-left">s-plane — eigenvalues as R<sub>eq</sub> varies</figcaption>
+    </figure>
+    <figure>
+      <canvas id="evm-step" role="img" aria-label="Step response at the selected parameter value"></canvas>
+      <figcaption id="evm-cap-right">e<sub>o</sub>(t) after a 1 V step in e<sub>i</sub></figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="evm-readout"></div>
+</div>
+
+<script>
+  import { eigen2, type Mat2, type Cx, cSub, cMul, cAbs,
+           quadraticRoots, stepResponseResidues } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('evm')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const modeEl = q<HTMLSelectElement>('#evm-mode');
+  const rpEl = q<HTMLInputElement>('#evm-rp');
+  const lpEl = q<HTMLInputElement>('#evm-lp');
+  const cpEl = q<HTMLInputElement>('#evm-cp');
+  const reqEl = q<HTMLInputElement>('#evm-req');
+  const kEl = q<HTMLInputElement>('#evm-k');
+  const supplyParams = q<HTMLDivElement>('#evm-supply-params');
+  const locusParams = q<HTMLDivElement>('#evm-locus-params');
+  const splane = q<HTMLCanvasElement>('#evm-splane');
+  const stepCanvas = q<HTMLCanvasElement>('#evm-step');
+  const readout = q<HTMLDivElement>('#evm-readout');
+  const capLeft = q<HTMLElement>('#evm-cap-left');
+  const capRight = q<HTMLElement>('#evm-cap-right');
+
+  // The lecture's sidebar plant, 1/(s^2 + a s + b) behind a gain K.
+  const LOCUS_A = 20;
+  const LOCUS_B = 50;
+  const K_MAX = 2000;
+  const SIM_STEPS = 2000;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    // toPrecision flips to exponential above the precision (1004 -> "1.00e+3");
+    // round-tripping through Number keeps plain digits in the readable range.
+    return String(Number(x.toPrecision(d)));
+  };
+
+  const fmtRoots = (r: { real: boolean; lambda: [number, number]; im: number }) =>
+    r.real ? `${sig(r.lambda[0])}, ${sig(r.lambda[1])}`
+           : `${sig(r.lambda[0])} ± ${sig(r.im)}j`;
+
+  /** A(Req) for the supply, row-major, with state [eo, i]. */
+  const supplyA = (Rp: number, Lp: number, Cp: number, Req: number): Mat2 =>
+    [-1 / (Req * Cp), 1 / Cp, -1 / Lp, -Rp / Lp];
+
+  /** Both roots as complex pairs, whichever case eigen2 reports. */
+  function rootsOf(m: Mat2): [Cx, Cx] {
+    const e = eigen2(m);
+    return e.real
+      ? [[e.lambda[0], 0], [e.lambda[1], 0]]
+      : [[e.lambda[0], e.im], [e.lambda[0], -e.im]];
+  }
+
+  /**
+   * Residual of substituting a root back into the characteristic equation
+   * lambda^2 - tr*lambda + det = 0, normalised by det so it is dimensionless.
+   *
+   * This is the check that matters for this tool: everything drawn is a root,
+   * and a root that does not satisfy the characteristic equation is a wrong
+   * branch of the quadratic formula, which plots perfectly plausibly.
+   */
+  function residual(m: Mat2, r: Cx): number {
+    const tr = m[0] + m[3];
+    const det = m[0] * m[3] - m[1] * m[2];
+    const v = cSub(cMul(r, r), [tr * r[0] - det, tr * r[1]]);
+    return cAbs(v) / Math.abs(det);
+  }
+
+  /**
+   * How many RK4 sub-steps each output sample needs.
+   *
+   * RK4 is stable only while |lambda|*dt stays below about 2.8, and the time
+   * window here is sized from the oscillation period -- which says nothing
+   * about the fastest root. A heavily overdamped case has a root far beyond
+   * 1/period, and integrating it at the window's own step size diverges to
+   * NaN. Sub-stepping fixes that while keeping the output array the fixed
+   * length the verification indexing assumes.
+   */
+  function subSteps(dtOut: number, roots: Cx[]) {
+    const fastest = Math.max(...roots.map(cAbs), 1e-30);
+    return Math.min(Math.max(1, Math.ceil((dtOut * fastest) / 0.1)), 400);
+  }
+
+  /** RK4 step response of a monic second-order system, gain*step input. */
+  function simulate(b1: number, b0: number, gain: number, tEnd: number) {
+    // y'' + b1 y' + b0 y = gain * u(t), integrated as two first-order states.
+    const dtOut = tEnd / SIM_STEPS;
+    const sub = subSteps(dtOut, quadraticRoots(b1, b0));
+    const dt = dtOut / sub;
+    const f = (y: number, v: number): [number, number] => [v, gain - b1 * v - b0 * y];
+    let y = 0, v = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      for (let m = 0; m < sub; m++) {
+        const [a1, c1] = f(y, v);
+        const [a2, c2] = f(y + (dt / 2) * a1, v + (dt / 2) * c1);
+        const [a3, c3] = f(y + (dt / 2) * a2, v + (dt / 2) * c2);
+        const [a4, c4] = f(y + dt * a3, v + dt * c3);
+        y += (dt / 6) * (a1 + 2 * a2 + 2 * a3 + a4);
+        v += (dt / 6) * (c1 + 2 * c2 + 2 * c3 + c4);
+      }
+      out.push([n * dtOut, y]);
+    }
+    return out;
+  }
+
+  /**
+   * Time window for a monic second-order system: long enough to settle, but
+   * capped so a lightly damped case stays a readable oscillation. Returns the
+   * window and whether it is actually long enough to have settled, because a
+   * final-value check read off an unsettled trace is a wrong number.
+   */
+  function window2(b1: number, b0: number) {
+    const wn = Math.sqrt(b0);
+    const zeta = b1 / (2 * wn);
+    const period = zeta < 1 ? 2 * Math.PI / (wn * Math.sqrt(1 - zeta * zeta)) : 2 * Math.PI / wn;
+    const settle = zeta > 0 ? 6 / (zeta * wn) : Infinity;
+    const tEnd = Math.min(Math.max(settle, 6 * period), 30 * period);
+    return { tEnd, settled: settle <= tEnd, wn, zeta };
+  }
+
+  function draw() {
+    const mode = modeEl.value;
+    supplyParams.hidden = mode !== 'evm';
+    locusParams.hidden = mode !== 'locus';
+    // The two modes are different systems, so they get different figures. The
+    // locus mode has no device at all, which is exactly the point of slide 14.
+    q('#evm-fig-supply').hidden = mode !== 'evm';
+    q('#evm-fig-locus').hidden = mode !== 'locus';
+
+    const Rp = Math.pow(10, parseFloat(rpEl.value));
+    const Lp = Math.pow(10, parseFloat(lpEl.value));
+    const Cp = Math.pow(10, parseFloat(cpEl.value));
+    const Req = Math.pow(10, parseFloat(reqEl.value));
+    const K = parseFloat(kEl.value);
+
+    q<HTMLOutputElement>('#evm-rp-v').value = Rp.toPrecision(3);
+    q<HTMLOutputElement>('#evm-lp-v').value = (Lp * 1e3).toPrecision(3);
+    q<HTMLOutputElement>('#evm-cp-v').value = (Cp * 1e6).toPrecision(3);
+    q<HTMLOutputElement>('#evm-req-v').value = Req.toPrecision(3);
+    q<HTMLOutputElement>('#evm-k-v').value = K.toFixed(0);
+
+    setFigureValues(root, {
+      Rp: `${Rp.toPrecision(3)} Ω`,
+      Lp: `${(Lp * 1e3).toPrecision(3)} mH`,
+      Cp: `${(Cp * 1e6).toPrecision(3)} µF`,
+      Req: `${Req.toPrecision(3)} Ω`,
+    });
+
+    const colors = themeColors();
+    const wn = 1 / Math.sqrt(Lp * Cp);
+
+    capLeft.innerHTML = mode === 'evm'
+      ? 's-plane — eigenvalues as R<sub>eq</sub> varies'
+      : 's-plane — closed-loop roots as K varies (a different system)';
+    capRight.innerHTML = mode === 'evm'
+      ? 'e<sub>o</sub>(t) after a 1 V step in e<sub>i</sub>'
+      : 'y(t) after a unit step command';
+
+    /* ---------------- locus in the s-plane ---------------- */
+
+    // Sweep the parameter, collecting one polyline per root branch. Branches
+    // are kept apart by continuity: at each step the pair is matched to the
+    // previous pair in whichever order moves the least.
+    const SWEEP = 220;
+    const branchA: Array<[number, number]> = [];
+    const branchB: Array<[number, number]> = [];
+    let prev: [Cx, Cx] | null = null;
+
+    const sweepValue = (n: number) => {
+      const u = n / SWEEP;
+      if (mode === 'evm') {
+        const lo = parseFloat(reqEl.min), hi = parseFloat(reqEl.max);
+        return Math.pow(10, lo + u * (hi - lo));
+      }
+      return u * K_MAX;
+    };
+    const rootsAt = (value: number): [Cx, Cx] =>
+      mode === 'evm'
+        ? rootsOf(supplyA(Rp, Lp, Cp, value))
+        : quadraticRoots(LOCUS_A, LOCUS_B + value);
+
+    for (let n = 0; n <= SWEEP; n++) {
+      let [r1, r2] = rootsAt(sweepValue(n));
+      if (prev) {
+        const keep = cAbs(cSub(r1, prev[0])) + cAbs(cSub(r2, prev[1]));
+        const swap = cAbs(cSub(r2, prev[0])) + cAbs(cSub(r1, prev[1]));
+        if (swap < keep) { const t = r1; r1 = r2; r2 = t; }
+      }
+      branchA.push([r1[0], r1[1]]);
+      branchB.push([r2[0], r2[1]]);
+      prev = [r1, r2];
+    }
+
+    const current = mode === 'evm'
+      ? rootsOf(supplyA(Rp, Lp, Cp, Req))
+      : quadraticRoots(LOCUS_A, LOCUS_B + K);
+
+    // The window is fitted to the locus that was just computed rather than to
+    // omega_n. Under a heavy load the fast root sits at -1/(Req Cp), which is
+    // an order of magnitude beyond omega_n, and a window sized from omega_n
+    // put the whole branch off the left-hand edge. The two axes are scaled
+    // independently for the same reason: a locus that is ten times taller
+    // than it is wide would otherwise be squeezed into a sliver.
+    const cloud = branchA.concat(branchB, current.map(([re, im]) => [re, im] as [number, number]));
+    // Size the window from the OSCILLATORY part of the locus. Under a heavy
+    // load the fast real root runs out to -1/(Req Cp), an order of magnitude
+    // past everything else, and fitting the window to it squashed the curl --
+    // the feature the plot exists to show -- into the right-hand edge. The
+    // lecture's own plot lets that branch run off the side, and so does this.
+    const oscillatory = cloud.filter(([, im]) => Math.abs(im) > 1e-12);
+    const scale = Math.max(
+      ...(oscillatory.length
+        ? oscillatory.map(([re, im]) => Math.max(Math.abs(re), Math.abs(im)))
+        : cloud.map(([re]) => Math.abs(re))),
+      1e-9,
+    );
+    const xMin = -2.2 * scale, xMax = 0.35 * scale, yMax = 1.25 * scale;
+    const clipped = Math.max(...cloud.map(([re]) => Math.abs(re))) > -xMin * 1.02;
+
+    const pv = makeView(splane, {
+      xMin, xMax, yMin: -yMax, yMax, equalAspect: true, pad: 38,
+    });
+    const tick = (v: number) => sig(v, 2);
+    drawAxes(pv, {
+      xTicks: [0.75, 0.5, 0.25].map((n) => +(n * xMin).toPrecision(2)),
+      yTicks: [-0.6, 0.6].map((n) => +(n * yMax).toPrecision(2)),
+      xTickLabel: tick, yTickLabel: tick,
+      xLabel: 'Re [rad/s]', yLabel: 'Im [rad/s]',
+    });
+
+    drawPolyline(pv, branchA, colors.series[0], 2);
+    drawPolyline(pv, branchB, colors.series[2], 2);
+
+    // Where the sweep starts, so the direction of travel is unambiguous.
+    for (const branch of [branchA, branchB]) {
+      const [x, y] = branch[0];
+      pv.ctx.save();
+      pv.ctx.fillStyle = colors.muted;
+      pv.ctx.beginPath();
+      pv.ctx.arc(pv.x(x), pv.y(y), 3, 0, 2 * Math.PI);
+      pv.ctx.fill();
+      pv.ctx.restore();
+    }
+    label(pv, mode === 'evm' ? `• R_eq = ${sig(Math.pow(10, parseFloat(reqEl.min)), 2)} Ω`
+                             : '• K = 0',
+          [xMin * 0.97, yMax * 0.86], colors.muted);
+
+    // Current parameter value, as crosses.
+    pv.ctx.save();
+    pv.ctx.strokeStyle = colors.accent;
+    pv.ctx.lineWidth = 2.5;
+    for (const [re, im] of current) {
+      const px = pv.x(re), py = pv.y(im), r = 7;
+      pv.ctx.beginPath();
+      pv.ctx.moveTo(px - r, py - r); pv.ctx.lineTo(px + r, py + r);
+      pv.ctx.moveTo(px + r, py - r); pv.ctx.lineTo(px - r, py + r);
+      pv.ctx.stroke();
+    }
+    pv.ctx.restore();
+
+    /* ---------------- step response at the current value ---------------- */
+
+    // Monic characteristic polynomial s^2 + b1 s + b0, and the DC numerator.
+    const coeffs = (value: number): [number, number, number] => {
+      if (mode === 'evm') {
+        const b1 = Rp / Lp + 1 / (value * Cp);
+        const b0 = (1 + Rp / value) / (Lp * Cp);
+        return [b1, b0, 1 / (Lp * Cp)];       // Eo/Ei = (1/LpCp)/(s^2+b1 s+b0)
+      }
+      return [LOCUS_A, LOCUS_B + value, value]; // Y/R = K/(s^2+a s+b+K)
+    };
+
+    const [b1, b0, gain] = coeffs(mode === 'evm' ? Req : K);
+    const { tEnd, settled } = window2(b1, b0);
+    const [s1, s2] = quadraticRoots(b1, b0);
+    const closed = stepResponseResidues(0, gain, 1, s1, s2);
+
+    const analytic: Array<[number, number]> = [];
+    for (let n = 0; n <= 500; n++) {
+      const t = (n / 500) * tEnd;
+      analytic.push([t, closed(t)]);
+    }
+    const numeric = simulate(b1, b0, gain, tEnd);
+
+    // Faint traces at the ends of the sweep: the spread IS the point.
+    const ghosts: Array<Array<[number, number]>> = [];
+    for (const value of [sweepValue(0), sweepValue(SWEEP)]) {
+      const [gb1, gb0, ggain] = coeffs(value);
+      const [g1, g2] = quadraticRoots(gb1, gb0);
+      const gf = stepResponseResidues(0, ggain, 1, g1, g2);
+      const trace: Array<[number, number]> = [];
+      for (let n = 0; n <= 300; n++) {
+        const t = (n / 300) * tEnd;
+        trace.push([t, gf(t)]);
+      }
+      ghosts.push(trace);
+    }
+
+    const all = analytic.concat(...ghosts).map(([, y]) => y);
+    const hi = Math.max(...all, 1) * 1.12;
+    const lo = Math.min(...all, 0) - hi * 0.06;
+
+    const sv = makeView(stepCanvas, { xMin: 0, xMax: tEnd, yMin: lo, yMax: hi, pad: 38 });
+    // hi/2 lands on top of the unit line whenever the overshoot is near 2x.
+    const yTicks = Math.abs(hi / 2 - 1) < 0.12 * hi ? [1] : [hi / 2, 1];
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd],
+      yTicks,
+      xTickLabel: (v) => (tEnd < 0.5 ? `${(v * 1e3).toPrecision(2)}m` : v.toPrecision(2)),
+      yTickLabel: (v) => sig(v, 2),
+      xLabel: 't [s]', yLabel: mode === 'evm' ? 'eo [V]' : 'y',
+    });
+    for (const ghost of ghosts) drawPolyline(sv, ghost, colors.muted, 1, [4, 4]);
+    drawPolyline(sv, numeric, colors.series[1], 4);       // thick: RK4
+    drawPolyline(sv, analytic, colors.series[0], 1.75);   // thin over it: closed form
+
+    /* ---------------- verification ---------------- */
+
+    let maxGap = 0;
+    for (let n = 0; n <= 500; n++) {
+      const j = Math.round((n / 500) * SIM_STEPS);
+      maxGap = Math.max(maxGap, Math.abs(analytic[n][1] - numeric[j][1]));
+    }
+    const dcGain = gain / b0;
+    const gapPct = (maxGap / Math.abs(dcGain || 1)) * 100;
+
+    // Every root drawn, put back into its own characteristic equation.
+    let worstResidual = 0;
+    if (mode === 'evm') {
+      for (let n = 0; n <= SWEEP; n += 5) {
+        const m = supplyA(Rp, Lp, Cp, sweepValue(n));
+        for (const r of rootsOf(m)) worstResidual = Math.max(worstResidual, residual(m, r));
+      }
+    } else {
+      for (let n = 0; n <= SWEEP; n += 5) {
+        const b = LOCUS_B + sweepValue(n);
+        const m: Mat2 = [0, 1, -b, -LOCUS_A];   // companion form of s^2+as+b
+        for (const r of quadraticRoots(LOCUS_A, b)) {
+          worstResidual = Math.max(worstResidual, residual(m, r));
+        }
+      }
+    }
+
+    const e = eigen2(mode === 'evm'
+      ? supplyA(Rp, Lp, Cp, Req)
+      : [0, 1, -(LOCUS_B + K), -LOCUS_A] as Mat2);
+
+    /* ---------------- readout ---------------- */
+
+    if (mode === 'evm') {
+      // With no load the damping is whatever Rp alone provides, so the
+      // eigenvalues have a closed form worth landing on exactly.
+      const noLoad = eigen2(supplyA(Rp, Lp, Cp, Infinity));
+      const zetaNoLoad = (Rp / 2) * Math.sqrt(Cp / Lp);
+      const noLoadRow = zetaNoLoad < 1
+        ? `${fmtRoots(noLoad)}, matching −R<sub>p</sub>/2L<sub>p</sub> ± jωₙ√(1−ζ²) =
+           ${sig(-Rp / (2 * Lp))} ± ${sig(wn * Math.sqrt(1 - zetaNoLoad ** 2))}j
+           — the load has stopped contributing damping`
+        : `${fmtRoots(noLoad)} — real, because R<sub>p</sub> alone already gives
+           ζ = ${sig(zetaNoLoad)} ≥ 1`;
+      const ends = [sweepValue(0), sweepValue(SWEEP)].map((v) => {
+        const r = eigen2(supplyA(Rp, Lp, Cp, v));
+        return `R<sub>eq</sub> = ${sig(v, 2)} Ω → ${fmtRoots(r)}`;
+      });
+      readout.innerHTML = `
+        <table>
+          <tr><th>eigenvalues at this load</th>
+              <td colspan="2">${fmtRoots(e)} rad/s
+              <span class="tag">${e.real ? 'real — overdamped' : 'complex pair'}</span></td></tr>
+          <tr><th>across the load range</th>
+              <td colspan="2">${ends[0]}<br>${ends[1]}</td></tr>
+          <tr><th>no-load limit (R<sub>eq</sub> → ∞)</th>
+              <td colspan="2">${noLoadRow}</td></tr>
+          <tr><th>DC gain e<sub>o</sub>/e<sub>i</sub></th>
+              <td colspan="2">${sig(dcGain)} = R<sub>eq</sub>/(R<sub>eq</sub>+R<sub>p</sub>),
+              the resistive divider${settled ? '' : ' (the trace is still ringing at the'
+              + ' end of the window, so read this from the formula, not the plot)'}</td></tr>
+          <tr><th>characteristic equation residual</th>
+              <td colspan="2">worst <b>${worstResidual.toExponential(1)}</b> over the swept
+              roots — every point drawn satisfies λ² − tr·λ + det = 0</td></tr>
+          <tr><th>closed form vs RK4</th>
+              <td colspan="2">${gapPct < 0.5
+                ? `max difference <b>${gapPct.toExponential(1)}%</b> of DC gain — the two agree`
+                : `max difference ${gapPct.toFixed(2)}% of DC gain`}</td></tr>
+        </table>
+        <p class="note">
+          R<sub>eq</sub> is not a knob anyone turns deliberately — it is whatever
+          the customer plugged in. The dashed traces are the step response at the
+          two ends of that range, and nothing about the supply changed between
+          them.${clipped ? ' The frame is sized to the curl, so under heavy load the'
+          + ' fast root runs off the left-hand edge — its value is in the row above.' : ''}
+        </p>`;
+    } else {
+      readout.innerHTML = `
+        <table>
+          <tr><th>plant</th>
+              <td colspan="2">1/(s² + ${LOCUS_A}s + ${LOCUS_B}) behind gain K,
+              unity feedback — the lecture's sidebar example, not the power supply</td></tr>
+          <tr><th>closed-loop roots at K = ${K.toFixed(0)}</th>
+              <td colspan="2">${fmtRoots(e)}
+              <span class="tag">${e.real ? 'real' : 'complex pair'}</span></td></tr>
+          <tr><th>breakaway</th>
+              <td colspan="2">K = ${(LOCUS_A ** 2 / 4 - LOCUS_B).toFixed(0)}, where
+              a² = 4(b+K); past it the roots leave the real axis and run vertically
+              at Re = −a/2 = ${(-LOCUS_A / 2).toFixed(1)}, because K only ever moves
+              the constant term</td></tr>
+          <tr><th>DC gain</th>
+              <td colspan="2">${sig(dcGain)} = K/(b+K) — approaches 1 as K grows,
+              which is what the gain is for</td></tr>
+          <tr><th>characteristic equation residual</th>
+              <td colspan="2">worst <b>${worstResidual.toExponential(1)}</b> over the
+              swept roots</td></tr>
+          <tr><th>closed form vs RK4</th>
+              <td colspan="2">${gapPct < 0.5
+                ? `max difference <b>${gapPct.toExponential(1)}%</b> of DC gain — the two agree`
+                : `max difference ${gapPct.toFixed(2)}% of DC gain`}</td></tr>
+        </table>
+        <p class="note">
+          Compare the shape with the other mode. K enters the characteristic
+          equation linearly and only in the constant term, so the locus is the
+          textbook two-branch break-away. R<sub>eq</sub> enters as 1/R<sub>eq</sub>
+          and in both coefficients, so the migration curls instead. Same axes,
+          different question.
+        </p>`;
+    }
+  }
+
+  [rpEl, lpEl, cpEl, reqEl, kEl].forEach((el) => el.addEventListener('input', draw));
+  modeEl.addEventListener('change', draw);
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/EigenvalueMigration.astro';
+---
+
+<BaseLayout title="Eigenvalue Migration with Load — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Eigenvalue Migration with Load</h1>
+  <p class="lede">
+    The load resistance of a voltage-source supply sits inside the
+    <code>A</code> matrix, so the poles are a function of whatever the customer
+    plugged in. Sweeping it traces an eigenvalue migration — which is
+    <em>not</em> a root locus, and the fastest way to stop confusing the two is
+    to draw both on the same axes and watch them behave differently.
+  </p>
+  <Widget />
+</BaseLayout>

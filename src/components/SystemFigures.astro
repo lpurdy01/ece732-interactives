@@ -1,0 +1,42 @@
+---
+// The two pictures above an interactive: the device, and its signal graph.
+//
+// They are one component because they are one idea. The schematic says where
+// R_p physically is; the block diagram says where R_p enters the algebra; the
+// sliders underneath move R_p. All three carry the same `data-sym`, so
+// `bindFigureHighlight` can light the three of them at once, and that is the
+// only reason a reader ever has to guess which symbol is which.
+//
+// Rendered at build time as inert SVG. Values are written in later by the
+// component's own script -- a figure must never print a number the page has
+// not computed.
+import { schematicSvg } from '../lib/schematic';
+import { diagramSvg } from '../lib/diagram-svg';
+import type { FigurePair } from '../lib/figures';
+
+interface Props extends FigurePair {
+  /** Needed only when a tool swaps between figure sets. */
+  id?: string;
+  hidden?: boolean;
+}
+
+const { physical, block, physicalCaption, blockCaption, id, hidden } = Astro.props as Props;
+
+const physicalSvg = physical ? schematicSvg(physical, { className: 'sysfig-svg', ariaLabel: physical.title }) : null;
+const blockHtml = diagramSvg(block, { regions: false, className: 'sysfig-svg', ariaLabel: block.title });
+---
+
+<div class:list={['sysfig', { 'sysfig-solo': !physical }]} id={id} hidden={hidden}>
+  {physicalSvg && (
+    <figure class="sysfig-panel">
+      <h3 class="sysfig-title">the device</h3>
+      <div class="sysfig-art" set:html={physicalSvg} />
+      {physicalCaption && <figcaption>{physicalCaption}</figcaption>}
+    </figure>
+  )}
+  <figure class="sysfig-panel">
+    <h3 class="sysfig-title">the same system as a block diagram</h3>
+    <div class="sysfig-art" set:html={blockHtml} />
+    <figcaption>{blockCaption}</figcaption>
+  </figure>
+</div>
