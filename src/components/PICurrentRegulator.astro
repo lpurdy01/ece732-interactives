@@ -1,0 +1,301 @@
+---
+// Classical PI current regulation at locked rotor (W6L2, slides 22-42).
+//
+// With the rotor held there is no back-EMF, and the current loop is a PI
+// controller around a winding:
+//
+//   controller   Kp + Ki/s = (Ki/s)(tau_c s + 1),     tau_c = Kp/Ki
+//   winding      1/(Lp s + Rp) = (1/Rp)/(tau_e s + 1), tau_e = Lp/Rp
+//
+//   I/I* = (Kp s + Ki) / (Lp s^2 + (Kp + Rp) s + Ki)
+//
+// The controller's zero sits at -1/tau_c and the winding's pole at -1/tau_e.
+// Put one on the other and they cancel, leaving a single integrator in the
+// loop and a first-order closed loop with bandwidth Ki/Rp:
+//
+//   Kp = 2 pi f Lp,   Ki = 2 pi f Rp      ->   I/I* = 2 pi f / (s + 2 pi f)
+//
+// This tool holds Kp at that value and moves the zero: Ki = 2 pi f Rp / rho,
+// so rho = tau_c/tau_e. rho = 1 is the tuning rule; either side of it the
+// cancellation is missed and a second, slower pole shows up next to the zero
+// -- as a slow tail (rho > 1) or as overshoot (rho < 1).
+//
+// The root locus is the same loop with the controller gain scaled, and the
+// step response is RK4 on the two states with the closed-form residue
+// expansion drawn over it.
+import SystemFigures from './SystemFigures.astro';
+import { piRegulatorFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="pic">
+  <SystemFigures {...piRegulatorFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="fd">f<sub>desired</sub>
+        <input type="range" id="pic-fd" min="1" max="3.5" step="0.02" value="3" />
+        <output id="pic-fd-v">1000</output> Hz</label>
+      <label class="slider" data-sym="rho">τ<sub>c</sub> / τ<sub>e</sub>
+        <input type="range" id="pic-rho" min="0.25" max="3" step="0.05" value="1" />
+        <output id="pic-rho-v">1.00</output></label>
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="pic-rp" min="-1" max="1" step="0.02" value="0" />
+        <output id="pic-rp-v">1.00</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="pic-lp" min="-4" max="-2" step="0.02" value="-3" />
+        <output id="pic-lp-v">1.00</output> mH</label>
+    </div>
+    <div class="presets">
+      <button data-rho="1">τ<sub>c</sub> = τ<sub>e</sub></button>
+      <button data-rho="1.5">τ<sub>c</sub> = 1.5 τ<sub>e</sub></button>
+      <button data-rho="0.5">τ<sub>c</sub> = 0.5 τ<sub>e</sub></button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="pic-splane" role="img" aria-label="Pole-zero map and root locus of the current loop"></canvas>
+      <figcaption>× open-loop poles, ○ controller zero, ● closed-loop poles, and the locus as the gain scales</figcaption>
+    </figure>
+    <figure>
+      <canvas id="pic-step" role="img" aria-label="Current after a one amp step in the command"></canvas>
+      <figcaption>i(t) after a 1 A step in i*</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="pic-readout"></div>
+</div>
+
+<script>
+  import { type Cx, quadraticRoots, stepResponseResidues } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors, type View } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('pic')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const fdEl = q<HTMLInputElement>('#pic-fd');
+  const rhoEl = q<HTMLInputElement>('#pic-rho');
+  const rpEl = q<HTMLInputElement>('#pic-rp');
+  const lpEl = q<HTMLInputElement>('#pic-lp');
+  const planeCanvas = q<HTMLCanvasElement>('#pic-splane');
+  const stepCanvas = q<HTMLCanvasElement>('#pic-step');
+  const readout = q<HTMLDivElement>('#pic-readout');
+
+  const SIM_STEPS = 1500;   // samples kept; the integrator may take more steps than this
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+  const cx = (z: Cx) => (Math.abs(z[1]) < 1e-9 * Math.max(1, Math.abs(z[0]))
+    ? sig(z[0]) : `${sig(z[0])} ± j${sig(Math.abs(z[1]))}`);
+
+  /** Closed-loop poles: roots of Lp s^2 + (Kp + Rp) s + Ki. */
+  const poles = (Kp: number, Ki: number, R: number, L: number) =>
+    quadraticRoots((Kp + R) / L, Ki / L);
+
+  /** I/I* at s = j 2 pi f, as [magnitude, phase in degrees]. */
+  function response(f: number, Kp: number, Ki: number, R: number, L: number): [number, number] {
+    const w = 2 * Math.PI * f;
+    const num: Cx = [Ki, Kp * w];
+    const den: Cx = [Ki - L * w * w, (Kp + R) * w];
+    const mag = Math.hypot(num[0], num[1]) / Math.hypot(den[0], den[1]);
+    const phase = Math.atan2(num[1], num[0]) - Math.atan2(den[1], den[0]);
+    return [mag, (phase * 180) / Math.PI];
+  }
+
+  /**
+   * RK4 on the two states the block diagram has: the winding current and the
+   * controller's integrator. Independent of the residue expansion it is
+   * drawn against.
+   */
+  function simulate(Kp: number, Ki: number, R: number, L: number, tEnd: number, fastest: number) {
+    // A fast winding with a slow loop is stiff: the window is set by the slow
+    // pole and the step by the fast one, so the step count follows their ratio.
+    const sub = Math.max(2, Math.ceil((3 * tEnd * fastest) / SIM_STEPS));
+    const dt = tEnd / (SIM_STEPS * sub);
+    const f = (i: number, x: number): [number, number] =>
+      [(Kp * (1 - i) + Ki * x - R * i) / L, 1 - i];
+    let i = 0, x = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS * sub; n++) {
+      const a = f(i, x);
+      const b = f(i + (dt / 2) * a[0], x + (dt / 2) * a[1]);
+      const c = f(i + (dt / 2) * b[0], x + (dt / 2) * b[1]);
+      const d = f(i + dt * c[0], x + dt * c[1]);
+      i += (dt / 6) * (a[0] + 2 * b[0] + 2 * c[0] + d[0]);
+      x += (dt / 6) * (a[1] + 2 * b[1] + 2 * c[1] + d[1]);
+      if (n % sub === 0) out.push([n * dt, i]);
+    }
+    return out;
+  }
+
+  function mark(view: View, at: Cx, kind: 'x' | 'o' | 'dot', color: string) {
+    const { ctx } = view;
+    const px = view.x(at[0]), py = view.y(at[1]);
+    ctx.save();
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (kind === 'x') {
+      ctx.moveTo(px - 6, py - 6); ctx.lineTo(px + 6, py + 6);
+      ctx.moveTo(px - 6, py + 6); ctx.lineTo(px + 6, py - 6);
+      ctx.stroke();
+    } else {
+      ctx.arc(px, py, kind === 'o' ? 7 : 5, 0, 2 * Math.PI);
+      if (kind === 'o') ctx.stroke(); else ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function draw() {
+    const fd = Math.pow(10, parseFloat(fdEl.value));
+    const rho = parseFloat(rhoEl.value);
+    const R = Math.pow(10, parseFloat(rpEl.value));
+    const L = Math.pow(10, parseFloat(lpEl.value));
+
+    const wd = 2 * Math.PI * fd;
+    const Kp = wd * L;
+    const Ki = (wd * R) / rho;
+    const tauE = L / R;
+    const tauC = Kp / Ki;
+
+    q<HTMLOutputElement>('#pic-fd-v').value = sig(fd);
+    q<HTMLOutputElement>('#pic-rho-v').value = rho.toFixed(2);
+    q<HTMLOutputElement>('#pic-rp-v').value = R.toPrecision(3);
+    q<HTMLOutputElement>('#pic-lp-v').value = (L * 1e3).toPrecision(3);
+    setFigureValues(root, {
+      Rp: `${R.toPrecision(3)} Ω`,
+      Lp: `${(L * 1e3).toPrecision(3)} mH`,
+      Kp: `${sig(Kp)} V/A`,
+      Ki: `${sig(Ki)} V/A·s`,
+      tc: `${sig(tauC * 1e3)} ms`,
+      te: `${sig(tauE * 1e3)} ms`,
+    });
+
+    const [p1, p2] = poles(Kp, Ki, R, L);
+    const zero = -1 / tauC;
+    const cancelled = Math.abs(rho - 1) < 1e-9;
+    const colors = themeColors();
+
+    /* ---------------- s-plane ---------------- */
+
+    // Locus: the same loop with the controller gain scaled by g.
+    const upper: Array<[number, number]> = [];
+    const lower: Array<[number, number]> = [];
+    for (let n = 0; n <= 240; n++) {
+      const g = Math.pow(10, -3 + (n / 240) * 5);
+      const [a, b] = poles(g * Kp, g * Ki, R, L);
+      upper.push([a[0], a[1]]);
+      lower.push([b[0], b[1]]);
+    }
+    const reach = 1.25 * Math.max(Math.abs(p1[0]), Math.abs(p2[0]), 1 / tauE, 1 / tauC, wd);
+    const pv = makeView(planeCanvas, {
+      xMin: -reach, xMax: 0.12 * reach, yMin: -0.5 * reach, yMax: 0.5 * reach, pad: 30,
+    });
+    drawAxes(pv, {
+      xTicks: [-wd], xTickLabel: () => '−2πf',
+      xLabel: 'Re [rad/s]', yLabel: 'Im',
+    });
+    const clip = (pts: Array<[number, number]>) => pts.filter(([x]) => x >= -reach);
+    drawPolyline(pv, clip(upper), colors.series[0], 1.6);
+    drawPolyline(pv, clip(lower), colors.series[0], 1.6);
+    mark(pv, [0, 0], 'x', colors.muted);
+    mark(pv, [-1 / tauE, 0], 'x', colors.muted);
+    mark(pv, [zero, 0], 'o', colors.series[1]);
+    mark(pv, p1, 'dot', colors.accent);
+    mark(pv, p2, 'dot', colors.accent);
+    label(pv, '−1/τe', [-1 / tauE, 0.1 * reach], colors.muted, 'center');
+    label(pv, '−1/τc', [zero, -0.14 * reach], colors.series[1], 'center');
+
+    /* ---------------- step response ---------------- */
+
+    // Long enough for the slowest closed-loop pole, but not so long that the
+    // fast rise becomes a vertical line at the left edge.
+    const slow = Math.min(Math.abs(p1[0]), Math.abs(p2[0]));
+    const want = Math.max(6 / wd, 5 / slow);
+    const tEnd = Math.min(want, 30 / wd);
+    const capped = want > tEnd * (1 + 1e-9);
+
+    const numeric = simulate(Kp, Ki, R, L, tEnd, Math.max(Math.hypot(p1[0], p1[1]), Math.hypot(p2[0], p2[1])));
+    const exactAt = stepResponseResidues(Kp, Ki, L, p1, p2);
+    const exact: Array<[number, number]> = [];
+    const ideal: Array<[number, number]> = [];
+    let maxGap = 0;
+    for (let n = 0; n <= 300; n++) {
+      const t = (n / 300) * tEnd;
+      exact.push([t, exactAt(t)]);
+      ideal.push([t, 1 - Math.exp(-wd * t)]);
+      maxGap = Math.max(maxGap, Math.abs(exactAt(t) - numeric[Math.round((n / 300) * SIM_STEPS)][1]));
+    }
+    const peak = Math.max(...numeric.map(([, y]) => y));
+    const sv = makeView(stepCanvas, { xMin: 0, xMax: tEnd, yMin: -0.1, yMax: Math.max(1.2, peak * 1.12), pad: 38 });
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd], yTicks: [0.5, 1],
+      xTickLabel: (v) => `${sig(v * 1e3, 2)}m`, xLabel: 't [s]', yLabel: 'i [A]',
+    });
+    drawPolyline(sv, [[0, 1], [tEnd, 1]], colors.muted, 1, [4, 4]);
+    drawPolyline(sv, ideal, colors.series[1], 1.6, [6, 3]);
+    drawPolyline(sv, numeric, colors.series[0], 4);     // thick: RK4
+    drawPolyline(sv, exact, colors.accent, 1.75);       // thin over it: closed form
+    label(sv, 'first order at f desired', [tEnd * 0.98, 0.08], colors.series[1], 'right');
+
+    /* ---------------- readout ---------------- */
+
+    // -3 dB point found on the response itself: the highest frequency at
+    // which |I/I*| is still above 1/sqrt(2), refined by bisection in log f.
+    const above = (lf: number) => response(Math.pow(10, lf), Kp, Ki, R, L)[0] >= Math.SQRT1_2;
+    let lo = -2, hi = 7;
+    for (let lf = 7; lf >= -2; lf -= 0.01) { if (above(lf)) { lo = lf; hi = lf + 0.01; break; } }
+    for (let n = 0; n < 40; n++) { const mid = (lo + hi) / 2; if (above(mid)) lo = mid; else hi = mid; }
+    const fBw = Math.pow(10, (lo + hi) / 2);
+
+    // Time to 63.2% read off the RK4 trace; 1/(2 pi f) when the loop is first order.
+    let t63 = NaN;
+    for (const [t, i] of numeric) { if (i >= 1 - Math.exp(-1)) { t63 = t; break; } }
+    const overshoot = Math.max(0, peak - 1) * 100;
+    const simFinal = numeric[SIM_STEPS][1];
+
+    const rows = [fd / 100, fd / 10, fd].map((f) => {
+      const [mag, ph] = response(f, Kp, Ki, R, L);
+      return `<tr><th>at ${sig(f)} Hz</th><td>${sig(20 * Math.log10(mag))} dB</td><td>${sig(ph)}°</td></tr>`;
+    }).join('');
+
+    const verdict = cancelled
+      ? 'The zero sits on the winding pole and they cancel. What is left is one closed-loop pole at −2πf: first order, no overshoot, −3 dB and −45° at the desired frequency.'
+      : rho > 1
+        ? 'The zero is to the right of the winding pole. One closed-loop pole is trapped between the origin and the zero; it ends up close to the zero and it is slow, so the current gets most of the way quickly and then creeps.'
+        : 'The zero is to the left of the winding pole. Nothing cancels, the integral gain is larger than the rule asks for, and the response overshoots the command before it comes back.';
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>gains</th><td>K<sub>p</sub> = 2πf·L<sub>p</sub> = <b>${sig(Kp)}</b> V/A</td>
+            <td>K<sub>i</sub> = 2πf·R<sub>p</sub>/(τ<sub>c</sub>/τ<sub>e</sub>) = <b>${sig(Ki)}</b> V/(A·s)</td></tr>
+        <tr><th>time constants</th><td>τ<sub>e</sub> = L<sub>p</sub>/R<sub>p</sub> = ${sig(tauE * 1e3)} ms</td>
+            <td>τ<sub>c</sub> = K<sub>p</sub>/K<sub>i</sub> = ${sig(tauC * 1e3)} ms
+              ${cancelled ? '<span class="tag">pole-zero cancellation</span>' : ''}</td></tr>
+        <tr><th>closed-loop poles</th><td>${cx(p1)}${Math.abs(p1[1]) > 0 ? '' : ` and ${cx(p2)}`} rad/s</td>
+            <td>zero at ${sig(zero)} rad/s, 2πf = ${sig(wd)} rad/s</td></tr>
+        <tr><th>−3 dB bandwidth</th><td>${sig(fBw)} Hz</td><td>asked for ${sig(fd)} Hz</td></tr>
+        ${rows}
+        <tr><th>step</th><td>63% at ${sig(t63 * 1e3)} ms (1/2πf = ${sig(1e3 / wd)} ms)</td>
+            <td>overshoot ${overshoot < 0.05 ? 'none' : `${sig(overshoot)}%`}${capped && Math.abs(1 - simFinal) > 0.005
+              ? `; still ${sig(Math.abs(1 - simFinal) * 100)}% from the command when this window ends` : ''}</td></tr>
+        <tr><th>closed form vs RK4</th>
+            <td colspan="2">${maxGap < 1e-4
+              ? `max difference <b>${maxGap.toExponential(1)}</b> A — the two agree`
+              : `max difference ${maxGap.toExponential(2)} A`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+  }
+
+  [fdEl, rhoEl, rpEl, lpEl].forEach((el) => el.addEventListener('input', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => { rhoEl.value = btn.dataset.rho!; draw(); });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

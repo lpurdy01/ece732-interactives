@@ -25,6 +25,8 @@ export interface BlockFigure {
   elements: any[];
   wires: any[];
   labels?: any[];
+  /** Display markup for a label whose `sym` is a plain key, e.g. Rhat -> R̂_{p}. */
+  symbols?: Record<string, { svg: string }>;
   title: string;
 }
 
@@ -532,3 +534,257 @@ export const secondOrderFigures: FigurePair = {
 };
 
 export const activeFeedbackPhysical = msdSchematic({ m: 'M', k: 'K_{p}', c: 'C_{p}' }, true);
+
+/* ------------------------------------------------------------------ */
+/* W5L1 -- manipulated input decoupling                                */
+/* ------------------------------------------------------------------ */
+
+const idcPhysical: Schematic = {
+  title: 'A rigid body pushed by two actuators mounted either side of its centre',
+  viewBox: [0, 0, 560, 262],
+  wires: [
+    { pts: [[150, 222], [410, 222]], tone: 'muted' },
+    { pts: [[150, 214], [150, 230]], tone: 'muted' },
+    { pts: [[410, 214], [410, 230]], tone: 'muted' },
+  ],
+  parts: [
+    { kind: 'mass', x: 280, y: 120, w: 330, h: 40 },
+  ],
+  markers: [
+    { kind: 'force', x: 150, y: 172, dir: 'v', len: 56, flow: -1, label: 'F_{1}', sym: 'Kb1', side: -1 },
+    { kind: 'force', x: 410, y: 172, dir: 'v', len: 56, flow: -1, label: 'F_{2}', sym: 'Kb2', side: 1 },
+    { kind: 'force', x: 220, y: 66, dir: 'v', len: 56, flow: -1, label: 'F', sym: 'F', side: -1 },
+    { kind: 'torque', x: 330, y: 120, len: 44, flow: -1, label: 'T', sym: 'T', side: -1 },
+    { kind: 'node', x: 280, y: 120 },
+  ],
+  labels: [
+    { x: 280, y: 244, text: 'L', sym: 'L' },
+    { x: 280, y: 112, text: 'centre of mass', small: true },
+    { x: 554, y: 256, text: 'the actuators are where they fit, not where the states are', anchor: 'end', small: true },
+  ],
+};
+
+const idcBlock: BlockFigure = {
+  title: 'Commands for the states, decoupled into commands for the actuators',
+  viewBox: [0, 0, 700, 246],
+  symbols: { L: { svg: 'L' }, Lhat: { svg: 'L̂' } },
+  elements: [
+    { kind: 'fn', x: 140, y: 110, w: 76, h: 150, label: 'B̂^{−1}', sym: 'Lhat' },
+    { kind: 'fn', x: 315, y: 65, w: 116, h: 46, label: frac('K_{b1}', 's+K_{b1}'), sym: 'Kb1', value: true },
+    { kind: 'fn', x: 315, y: 155, w: 116, h: 46, label: frac('K_{b2}', 's+K_{b2}'), sym: 'Kb2', value: true },
+    { kind: 'fn', x: 490, y: 110, w: 76, h: 150, label: 'B', sym: 'L' },
+  ],
+  wires: [
+    { pts: [[20, 65], [102, 65]] },
+    { pts: [[20, 155], [102, 155]] },
+    { pts: [[178, 65], [257, 65]] },
+    { pts: [[178, 155], [257, 155]] },
+    { pts: [[373, 65], [452, 65]] },
+    { pts: [[373, 155], [452, 155]] },
+    { pts: [[528, 65], [680, 65]] },
+    { pts: [[528, 155], [680, 155]] },
+  ],
+  labels: [
+    { sym: 'F^{*}', x: 24, y: 55, anchor: 'start' },
+    { sym: 'T^{*}', x: 24, y: 145, anchor: 'start' },
+    { sym: 'F_{1}^{*}', x: 216, y: 55 },
+    { sym: 'F_{2}^{*}', x: 216, y: 145 },
+    { sym: 'F_{1}', x: 412, y: 55 },
+    { sym: 'F_{2}', x: 412, y: 145 },
+    { sym: 'F', tag: 'F', x: 650, y: 55 },
+    { sym: 'T', tag: 'T', x: 650, y: 145 },
+    { sym: 'Lhat', value: true, x: 140, y: 214 },
+    { sym: 'L', value: true, x: 490, y: 214 },
+  ],
+};
+
+export const inputDecouplingFigures: FigurePair = {
+  physical: idcPhysical,
+  block: idcBlock,
+  physicalCaption: 'Each actuator moves the body and turns it. Neither one is "the force input" or "the torque input".',
+  blockCaption: 'B is the geometry. B̂⁻¹ is the controller undoing it, so that F* reaches only F and T* reaches only T — if the estimate and the two actuators agree.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W5L2 -- disturbance input and nonlinear state feedback decoupling   */
+/* ------------------------------------------------------------------ */
+
+const didBlock: BlockFigure = {
+  title: 'Vehicle speed with drag as nonlinear state feedback, and the controller around it',
+  viewBox: [0, 0, 700, 300],
+  elements: [
+    { kind: 'sum', x: 110, y: 90 },
+    { kind: 'gain', x: 190, y: 90, w: 50, label: 'C_{a}', sym: 'Ca', value: true },
+    { kind: 'sum', x: 280, y: 90 },
+    { kind: 'sum', x: 380, y: 90 },
+    { kind: 'fn', x: 460, y: 90, w: 46, label: frac('1', 'm') },
+    { kind: 'fn', x: 540, y: 90, w: 46, label: frac('1', 's') },
+    { kind: 'fn', x: 470, y: 170, w: 130, h: 40, label: '½k(v+v_{w})^{2}', sym: 'vw' },
+    { kind: 'fn', x: 280, y: 205, w: 110, h: 40, label: 'decoupling', sym: 'khat', value: true },
+  ],
+  wires: [
+    { pts: [[20, 90], [97, 90]], sign: '+' },
+    { pts: [[123, 90], [165, 90]] },
+    { pts: [[215, 90], [267, 90]], sign: '+' },
+    { pts: [[293, 90], [367, 90]], sign: '+' },
+    { pts: [[393, 90], [437, 90]] },
+    { pts: [[483, 90], [517, 90]] },
+    { pts: [[563, 90], [685, 90]] },
+    { pts: [[380, 20], [380, 77]], sign: '-' },
+    { pts: [[610, 90], [610, 170], [535, 170]], tap: true },
+    { pts: [[405, 170], [380, 170], [380, 103]], sign: '-' },
+    { pts: [[650, 90], [650, 280], [110, 280], [110, 103]], tap: true, sign: '-' },
+    { pts: [[650, 215], [335, 215]], tap: true },
+    { pts: [[280, 185], [280, 103]], sign: '+' },
+  ],
+  labels: [
+    { sym: 'v^{*}', tag: 'vs', x: 24, y: 80, anchor: 'start' },
+    { sym: 'f_{m}', x: 330, y: 80 },
+    { sym: 'W sinθ', tag: 'th', x: 390, y: 30, anchor: 'start' },
+    { sym: 'v', x: 672, y: 80 },
+    { sym: 'physical', x: 470, y: 140 },
+    { sym: 'needs v, v_{w}, θ', x: 500, y: 240 },
+  ],
+};
+
+export const disturbanceDecouplingFigures: FigurePair = {
+  block: didBlock,
+  blockCaption: 'Drag is state feedback the air supplies, and it is nonlinear, so its gain depends on how fast you are going. The decoupling block adds back whichever of those terms the controller can compute.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W6 -- the regulated R-L circuit, drawn once for two tools           */
+/* ------------------------------------------------------------------ */
+
+/** Series R-L driven by a commanded voltage, optionally against a load voltage. */
+function rlSchematic(opts: { load: boolean; title: string; law: { text: string; sym: string }[]; note: string }): Schematic {
+  const wires: Schematic['wires'] = [
+    { pts: [[60, 60], [60, 101]] }, { pts: [[60, 149], [60, 190]] },
+    { pts: [[60, 60], [166, 60]] }, { pts: [[214, 60], [306, 60]] },
+    { pts: [[354, 60], [480, 60]] },
+    { pts: [[60, 190], [480, 190]] },
+  ];
+  const parts: Schematic['parts'] = [
+    { kind: 'vsrc', x: 60, y: 125, dir: 'v', flow: -1, label: 'e_{i}', side: -1 },
+    { kind: 'R', x: 190, y: 60, label: 'R_{p}', sym: 'Rp', value: true, side: -1 },
+    { kind: 'L', x: 330, y: 60, label: 'L_{p}', sym: 'Lp', value: true, side: -1 },
+  ];
+  if (opts.load) {
+    wires.push({ pts: [[480, 60], [480, 101]] }, { pts: [[480, 149], [480, 190]] });
+    parts.push({ kind: 'vsrc', x: 480, y: 125, dir: 'v', flow: -1, label: 'e_{o}', sym: 'eo', side: 1 });
+  } else {
+    wires.push({ pts: [[480, 60], [480, 190]] });
+  }
+  return {
+    title: opts.title,
+    viewBox: [0, 0, 560, 300],
+    boxes: [{ x: 40, y: 226, w: 360, h: 58, label: 'controller' }],
+    wires,
+    parts,
+    markers: [
+      { kind: 'current', x: 420, y: 60, len: 34, flow: 1, label: 'i', sym: 'i', side: -1 },
+      { kind: 'ground', x: 270, y: 190 },
+      { kind: 'couple', x: 60, y: 208, dir: 'v', len: 34, flow: -1 },
+    ],
+    labels: [
+      { x: 56, y: 252, text: 'e_{i} =', anchor: 'start' },
+      ...opts.law.map((l, n) => ({ x: 110 + n * 130, y: 252, text: l.text, sym: l.sym, anchor: 'start' })),
+      { x: 554, y: 294, text: opts.note, anchor: 'end', small: true },
+    ],
+  };
+}
+
+const vzrBlock: BlockFigure = {
+  title: 'Current loop with the physical resistance drawn as its own feedback path',
+  viewBox: [0, 0, 700, 310],
+  symbols: { Rhat: { svg: 'R̂_{p}' } },
+  elements: [
+    { kind: 'sum', x: 80, y: 90 },
+    { kind: 'gain', x: 160, y: 90, w: 50, label: 'R_{a}', sym: 'Ra', value: true },
+    { kind: 'sum', x: 250, y: 90 },
+    { kind: 'sum', x: 340, y: 90 },
+    { kind: 'fn', x: 430, y: 90, w: 54, label: frac('1', 'L_{p}'), sym: 'Lp' },
+    { kind: 'fn', x: 520, y: 90, w: 46, label: frac('1', 's') },
+    { kind: 'gain', x: 460, y: 170, w: 50, label: 'R_{p}', sym: 'Rp', value: true },
+    { kind: 'gain', x: 400, y: 245, w: 50, label: 'R̂_{p}', sym: 'Rhat', value: true },
+  ],
+  wires: [
+    { pts: [[15, 90], [67, 90]], sign: '+' },
+    { pts: [[93, 90], [135, 90]] },
+    { pts: [[185, 90], [237, 90]], sign: '+' },
+    { pts: [[263, 90], [327, 90]], sign: '+' },
+    { pts: [[353, 90], [403, 90]] },
+    { pts: [[457, 90], [497, 90]] },
+    { pts: [[543, 90], [685, 90]] },
+    { pts: [[340, 20], [340, 77]], sign: '-' },
+    { pts: [[590, 90], [590, 170], [485, 170]], tap: true },
+    { pts: [[435, 170], [340, 170], [340, 103]], sign: '-' },
+    { pts: [[620, 90], [620, 245], [425, 245]], tap: true },
+    { pts: [[375, 245], [250, 245], [250, 103]], sign: '+' },
+    { pts: [[650, 90], [650, 296], [80, 296], [80, 103]], tap: true, sign: '-' },
+  ],
+  labels: [
+    { sym: 'i^{*}', x: 18, y: 80, anchor: 'start' },
+    { sym: 'e_{i}', x: 296, y: 80 },
+    { sym: 'e_{o}', tag: 'eo', x: 350, y: 30, anchor: 'start' },
+    { sym: 'i', tag: 'i', x: 672, y: 80 },
+    { sym: 'a loop whose command is 0', x: 470, y: 140 },
+  ],
+};
+
+export const virtualZeroFigures: FigurePair = {
+  physical: rlSchematic({
+    load: true,
+    title: 'Series R-L supply regulating its current into an unknown load voltage',
+    law: [{ text: 'R_{a}(i^{*} − i)', sym: 'Ra' }, { text: '+ R̂_{p} i', sym: 'Rhat' }],
+    note: 'the second term is the decoupling; without it the controller is a proportional gain',
+  }),
+  block: vzrBlock,
+  physicalCaption: 'Rₚ is a part you bought. Rₐ and R̂ₚ are numbers in the controller that sets the source voltage.',
+  blockCaption: 'Rₚ feeds the current back exactly as Rₐ does — but nothing is subtracted from it first, so the reference it regulates toward is zero.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W6L2 -- PI current regulation at locked rotor                       */
+/* ------------------------------------------------------------------ */
+
+const picBlock: BlockFigure = {
+  title: 'PI controller and winding, each written with its own time constant',
+  viewBox: [0, 0, 640, 222],
+  symbols: {
+    Kp: { svg: 'K_{p}' }, Ki: { svg: 'K_{i}' }, tc: { svg: 'τ_{c}' }, te: { svg: 'τ_{e}' },
+  },
+  elements: [
+    { kind: 'sum', x: 90, y: 70 },
+    { kind: 'fn', x: 225, y: 70, w: 140, h: 48, label: frac('K_{i}(τ_{c}s+1)', 's'), sym: 'fd rho' },
+    { kind: 'fn', x: 435, y: 70, w: 120, h: 48, label: frac('1/R_{p}', 'τ_{e}s+1'), sym: 'Rp Lp' },
+  ],
+  wires: [
+    { pts: [[20, 70], [77, 70]], sign: '+' },
+    { pts: [[103, 70], [155, 70]] },
+    { pts: [[295, 70], [375, 70]] },
+    { pts: [[495, 70], [625, 70]] },
+    { pts: [[560, 70], [560, 200], [90, 200], [90, 83]], tap: true, sign: '-' },
+  ],
+  labels: [
+    { sym: 'i^{*}', x: 24, y: 60, anchor: 'start' },
+    { sym: 'e_{i}', x: 335, y: 60 },
+    { sym: 'i', tag: 'i', x: 605, y: 60 },
+    { sym: 'Kp', value: true, x: 165, y: 132 },
+    { sym: 'Ki', value: true, x: 235, y: 132 },
+    { sym: 'tc', value: true, x: 305, y: 132 },
+    { sym: 'te', value: true, x: 435, y: 132 },
+  ],
+};
+
+export const piRegulatorFigures: FigurePair = {
+  physical: rlSchematic({
+    load: false,
+    title: 'Motor winding with the rotor locked: resistance and inductance, no back-EMF',
+    law: [{ text: 'K_{p}(i^{*} − i)', sym: 'fd' }, { text: '+ K_{i}∫(i^{*} − i)dt', sym: 'fd rho' }],
+    note: 'a locked rotor makes no back-EMF, so the winding is all the controller sees',
+  }),
+  block: picBlock,
+  physicalCaption: 'With the shaft held, speed is zero and the mechanical half of the motor drops out of the current loop.',
+  blockCaption: 'The controller has a zero at −1/τc and the winding has a pole at −1/τe. Whether they sit on top of each other is the whole tuning question.',
+};

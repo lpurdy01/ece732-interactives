@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/InputDecoupling.astro';
+---
+
+<BaseLayout title="Manipulated Input Decoupling — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Manipulated Input Decoupling</h1>
+  <p class="lede">
+    Actuators are mounted where there is room for them, which is rarely where
+    the states are. Two actuators either side of a body each push it and turn
+    it, so a command to one of them is a command to both states at once.
+    Invert the geometry in the controller and each command reaches one state.
+    The test is a null test: command one state and look for the other to stay
+    at exactly zero.
+  </p>
+  <Widget />
+</BaseLayout>

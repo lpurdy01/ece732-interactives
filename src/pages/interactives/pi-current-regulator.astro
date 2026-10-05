@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/PICurrentRegulator.astro';
+---
+
+<BaseLayout title="PI Current Regulation — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>PI Current Regulation</h1>
+  <p class="lede">
+    The classical current loop: a PI controller around a winding. The
+    controller brings a zero, the winding brings a pole, and the tuning rule
+    is to put one on top of the other. Move the zero off the pole in either
+    direction and watch where the closed-loop poles go, and what the step
+    response does about it.
+  </p>
+  <Widget />
+</BaseLayout>

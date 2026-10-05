@@ -1,0 +1,263 @@
+---
+// The virtual zero reference in a regulated R-L supply (W6L1, slides 17-23).
+//
+//   Lp di/dt = e_i - Rp i - e_o
+//   e_i      = Ra (i* - i) + R^p i
+//
+// Collect the terms in i and the loop is being pulled toward two references
+// at once:
+//
+//   Lp di/dt = Ra (i* - i) + (Rp - R^p)(0 - i) - e_o
+//
+// Ra regulates toward the command. The physical resistance is ALSO a feedback
+// gain on i, and nothing is subtracted from i before it, so it regulates
+// toward zero -- the virtual zero reference. The current settles at the
+// weighted average of the two references,
+//
+//   i_ss / i* = Ra / (Ra + Rp - R^p),
+//
+// which is short of the command by an amount set by the ratio of the gains,
+// and no amount of Ra makes it exactly zero. Decoupling Rp (R^p = Rp) removes
+// the second reference: unity tracking with no integrator in the controller.
+//
+// What it does NOT buy is stiffness: the disturbance sees Ra + Rp - R^p, so
+// decoupling takes R^p ohms of low-frequency stiffness away again.
+//
+// The step response is integrated by RK4 and the closed form is drawn over it.
+import SystemFigures from './SystemFigures.astro';
+import { virtualZeroFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="vzr">
+  <SystemFigures {...virtualZeroFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="Rp">R<sub>p</sub>
+        <input type="range" id="vzr-rp" min="-1" max="1" step="0.02" value="0" />
+        <output id="vzr-rp-v">1.00</output> Ω</label>
+      <label class="slider" data-sym="Lp">L<sub>p</sub>
+        <input type="range" id="vzr-lp" min="-4" max="-1.5" step="0.02" value="-2.3" />
+        <output id="vzr-lp-v">5.01</output> mH</label>
+      <label class="slider" data-sym="Ra">R<sub>a</sub>
+        <input type="range" id="vzr-ra" min="0" max="20" step="0.1" value="4" />
+        <output id="vzr-ra-v">4.0</output> Ω</label>
+      <label class="slider" data-sym="Rhat">R̂<sub>p</sub> / R<sub>p</sub>
+        <input type="range" id="vzr-rh" min="0" max="1.3" step="0.01" value="0" />
+        <output id="vzr-rh-v">0.00</output></label>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="vzr-ref" checked /> show the loop without decoupling</label>
+    </div>
+    <div class="presets">
+      <button data-rh="0">no decoupling</button>
+      <button data-rh="0.8">R̂<sub>p</sub> 20% low</button>
+      <button data-rh="1">exact decoupling</button>
+      <button data-rh="1.2">R̂<sub>p</sub> 20% high</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="vzr-step" role="img" aria-label="Current after a one amp step in the command"></canvas>
+      <figcaption>i(t) after a 1 A step in i*, with e<sub>o</sub> = 0</figcaption>
+    </figure>
+    <figure>
+      <canvas id="vzr-frf" role="img" aria-label="Command tracking magnitude against frequency"></canvas>
+      <figcaption>command tracking |I / I*|</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="vzr-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, label, themeColors,
+           decades, decadeLabel } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('vzr')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const rpEl = q<HTMLInputElement>('#vzr-rp');
+  const lpEl = q<HTMLInputElement>('#vzr-lp');
+  const raEl = q<HTMLInputElement>('#vzr-ra');
+  const rhEl = q<HTMLInputElement>('#vzr-rh');
+  const refEl = q<HTMLInputElement>('#vzr-ref');
+  const stepCanvas = q<HTMLCanvasElement>('#vzr-step');
+  const frfCanvas = q<HTMLCanvasElement>('#vzr-frf');
+  const readout = q<HTMLDivElement>('#vzr-readout');
+
+  const F_LO = -1, F_HI = 6;   // log10 Hz
+  const SIM_STEPS = 1500;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+
+  /** RK4 on Lp di/dt = Ra (1 - i) - (Rp - Rhat) i: the block diagram, literally. */
+  function simulate(Ra: number, Rvz: number, L: number, tEnd: number) {
+    const dt = tEnd / SIM_STEPS;
+    const slope = (i: number) => (Ra * (1 - i) - Rvz * i) / L;
+    let i = 0;
+    const out: Array<[number, number]> = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      const k1 = slope(i);
+      const k2 = slope(i + (dt / 2) * k1);
+      const k3 = slope(i + (dt / 2) * k2);
+      const k4 = slope(i + dt * k3);
+      i += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4);
+      out.push([n * dt, i]);
+    }
+    return out;
+  }
+
+  /** |I/I*| at f: Ra / |j w L + Reff|. */
+  const track = (f: number, Ra: number, Reff: number, L: number) =>
+    Ra / Math.hypot(Reff, 2 * Math.PI * f * L);
+
+  function draw() {
+    const Rp = Math.pow(10, parseFloat(rpEl.value));
+    const L = Math.pow(10, parseFloat(lpEl.value));
+    const Ra = parseFloat(raEl.value);
+    const ratio = parseFloat(rhEl.value);
+    const Rhat = ratio * Rp;
+
+    q<HTMLOutputElement>('#vzr-rp-v').value = Rp.toPrecision(3);
+    q<HTMLOutputElement>('#vzr-lp-v').value = (L * 1e3).toPrecision(3);
+    q<HTMLOutputElement>('#vzr-ra-v').value = Ra.toFixed(1);
+    q<HTMLOutputElement>('#vzr-rh-v').value = ratio.toFixed(2);
+    setFigureValues(root, {
+      Rp: `${Rp.toPrecision(3)} Ω`,
+      Lp: `${(L * 1e3).toPrecision(3)} mH`,
+      Ra: `${Ra.toFixed(1)} Ω`,
+      Rhat: `${Rhat.toPrecision(3)} Ω`,
+    });
+
+    const Rvz = Rp - Rhat;          // the gain still pulling toward zero
+    const Reff = Ra + Rvz;          // what the dynamics and the disturbance see
+    const stable = Reff > 1e-9;
+    const colors = themeColors();
+
+    /* ---------------- step response ---------------- */
+
+    // An unstable or marginal loop has no time constant to scale the window
+    // by, so it borrows the one the loop would have with Reff = |Reff| + Ra.
+    const tau = stable ? L / Reff : L / (Math.abs(Reff) + Ra + Rp);
+    const tEnd = 6 * tau;
+    const iFinal = stable ? Ra / Reff : NaN;
+    const numeric = simulate(Ra, Rvz, L, tEnd);
+    const exactAt = (t: number) => (Math.abs(Reff) < 1e-9
+      ? (Ra * t) / L
+      : (Ra / Reff) * (1 - Math.exp((-Reff * t) / L)));
+    const exact: Array<[number, number]> = [];
+    let maxGap = 0;
+    for (let n = 0; n <= 300; n++) {
+      const t = (n / 300) * tEnd;
+      exact.push([t, exactAt(t)]);
+      maxGap = Math.max(maxGap, Math.abs(exactAt(t) - numeric[Math.round((n / 300) * SIM_STEPS)][1]));
+    }
+    const noDec = Ra / (Ra + Rp);   // where the same loop settles with no decoupling
+
+    const top = Math.max(1, ...numeric.map(([, y]) => y));
+    const sv = makeView(stepCanvas, { xMin: 0, xMax: tEnd, yMin: -0.12 * top, yMax: 1.18 * top, pad: 38 });
+    const tTick = (v: number) => (tEnd < 0.02 ? `${(v * 1e3).toPrecision(2)}m` : v.toPrecision(2));
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd], yTicks: [0.5, 1],
+      xTickLabel: tTick, xLabel: 't [s]', yLabel: 'i [A]',
+    });
+    drawPolyline(sv, [[0, 1], [tEnd, 1]], colors.muted, 1, [4, 4]);
+    label(sv, 'i* = 1 A', [tEnd * 0.98, 1 + 0.04 * top], colors.muted, 'right');
+    label(sv, 'virtual reference, 0 A', [tEnd * 0.98, 0.04 * top], colors.muted, 'right');
+    if (refEl.checked && Ra > 0) {
+      const tauRef = L / (Ra + Rp);
+      const ref: Array<[number, number]> = [];
+      for (let n = 0; n <= 300; n++) {
+        const t = (n / 300) * tEnd;
+        ref.push([t, noDec * (1 - Math.exp(-t / tauRef))]);
+      }
+      drawPolyline(sv, ref, colors.series[1], 1.6, [6, 3]);
+    }
+    drawPolyline(sv, numeric, colors.series[0], 4);     // thick: RK4
+    drawPolyline(sv, exact, colors.accent, 1.75);       // thin over it: closed form
+
+    /* ---------------- command tracking, log-log ---------------- */
+
+    const cur: Array<[number, number]> = [];
+    const ref: Array<[number, number]> = [];
+    const floor = -3;   // the bottom of the plot
+    for (let n = 0; n <= 300; n++) {
+      const lf = F_LO + (n / 300) * (F_HI - F_LO);
+      const f = Math.pow(10, lf);
+      cur.push([lf, Math.max(floor, Math.log10(Math.max(track(f, Ra, Reff, L), 1e-12)))]);
+      ref.push([lf, Math.max(floor, Math.log10(Math.max(track(f, Ra, Ra + Rp, L), 1e-12)))]);
+    }
+    const yHi = Math.max(0.5, Math.ceil(Math.max(...cur.map(([, y]) => y)) + 0.3));
+    const fv = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: -3, yMax: yHi, pad: 38 });
+    drawAxes(fv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(-3, yHi),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel,
+      xLabel: 'f [Hz]', yLabel: '|I/I*|', origin: false,
+    });
+    drawPolyline(fv, [[F_LO, 0], [F_HI, 0]], colors.muted, 1, [2, 4]);
+    label(fv, 'unity', [F_LO + 0.15, 0.12], colors.muted);
+    if (refEl.checked) drawPolyline(fv, ref, colors.series[1], 1.6, [6, 3]);
+    drawPolyline(fv, cur, colors.accent, 2.5);
+    const fb = stable ? Reff / (2 * Math.PI * L) : NaN;
+    if (stable && Math.log10(fb) > F_LO && Math.log10(fb) < F_HI) {
+      drawPolyline(fv, [[Math.log10(fb), -3], [Math.log10(fb), yHi]], colors.accent, 1, [4, 3]);
+      label(fv, 'fb', [Math.log10(fb) + 0.08, -2.75], colors.accent);
+    }
+
+    /* ---------------- readout ---------------- */
+
+    const simFinal = numeric[SIM_STEPS][1];
+    const ess = 1 - iFinal;
+    let verdict: string;
+    if (!stable) {
+      verdict = 'R̂<sub>p</sub> has cancelled more resistance than the loop has. The current does not settle; it runs away.';
+    } else if (Ra === 0) {
+      verdict = 'With R<sub>a</sub> = 0 nothing regulates toward i* at all, and the current stays at the only reference left: zero.';
+    } else if (Math.abs(Rvz) < 1e-9) {
+      verdict = 'The virtual zero reference is gone. The current reaches the command with no integrator in the controller.';
+    } else if (Rvz < 0) {
+      verdict = 'Over-decoupled: the leftover term now pushes away from zero, so the current settles above the command.';
+    } else {
+      verdict = `Two references, two gains: i* weighted by R<sub>a</sub> = ${sig(Ra)} Ω and zero weighted by ${sig(Rvz)} Ω. Raising R<sub>a</sub> shrinks the error but cannot remove it.`;
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>gain toward i*</th><td>R<sub>a</sub> = ${sig(Ra)} Ω</td>
+            <td>gain toward 0: R<sub>p</sub> − R̂<sub>p</sub> = <b>${Math.abs(Rvz) < 1e-9 ? '0' : sig(Rvz)}</b> Ω</td></tr>
+        <tr><th>settles at</th>
+            <td>${stable ? `<b>${sig(iFinal, 4)}</b> A = R<sub>a</sub>/(R<sub>a</sub>+R<sub>p</sub>−R̂<sub>p</sub>)` : 'does not settle'}</td>
+            <td>${stable ? `steady-state error ${Math.abs(ess) < 1e-9 ? '0' : sig(ess * 100)}% of the command` : '<span class="tag">unstable</span>'}</td></tr>
+        <tr><th>same loop, no decoupling</th>
+            <td>${sig(noDec, 4)} A</td><td>error ${sig((1 - noDec) * 100)}%</td></tr>
+        <tr><th>bandwidth</th>
+            <td>${stable ? `${sig(fb)} Hz` : '—'}</td>
+            <td>${stable ? `τ = L<sub>p</sub>/(R<sub>a</sub>+R<sub>p</sub>−R̂<sub>p</sub>) = ${sig(tau)} s` : '—'}</td></tr>
+        <tr><th>stiffness at DC, E<sub>o</sub>/I</th>
+            <td>${sig(Reff)} Ω</td>
+            <td>${sig(Ra + Rp)} Ω without decoupling — the decoupling gave away ${sig(Rhat)} Ω</td></tr>
+        <tr><th>closed form vs RK4</th>
+            <td colspan="2">${maxGap < 1e-4 * Math.max(1, top)
+              ? `max difference <b>${maxGap.toExponential(1)}</b> A — the two agree${stable ? `; RK4 ends at ${sig(simFinal, 4)} A after 6τ` : ''}`
+              : `max difference ${maxGap.toExponential(2)} A`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+  }
+
+  [rpEl, lpEl, raEl, rhEl].forEach((el) => el.addEventListener('input', draw));
+  refEl.addEventListener('change', draw);
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => { rhEl.value = btn.dataset.rh!; draw(); });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

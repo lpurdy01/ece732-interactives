@@ -235,7 +235,9 @@ async function sweepLayout(browser, origin, report, tag) {
                   '/interactives/physical-active-feedback/', '/interactives/operating-point-linearization/',
                   '/interactives/dynamic-stiffness/', '/interactives/voltage-source-stiffness/',
                   '/interactives/eigenvalue-migration/', '/interactives/motor-transfer-matrix/',
-                  '/interactives/motor-state-feedback/'];
+                  '/interactives/motor-state-feedback/', '/interactives/input-decoupling/',
+                  '/interactives/disturbance-decoupling/', '/interactives/virtual-zero-reference/',
+                  '/interactives/pi-current-regulator/'];
   for (const [w, h] of [[360, 780], [768, 1024], [1440, 900]]) {
     for (const scheme of ['light', 'dark']) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: scheme });
@@ -344,6 +346,34 @@ try {
         }
       }
     });
+    // Decoupling on and off: off disables a slider and greys a block.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/input-decoupling/',
+                       ['#idc-c1', '#idc-c2'], async (page, inspect) => {
+      await page.uncheck('#idc-on'); await inspect('decoupling off'); await page.check('#idc-on');
+    });
+    // Every controller, at the corners where over-decoupling goes unstable.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/disturbance-decoupling/',
+                       ['#did-inv', '#did-sim'], async (page, inspect) => {
+      for (const c of ['0', '1', '2', '3']) {
+        await page.selectOption('#did-case', c);
+        for (const [ca, kh] of [[0, 0.5], [0, 1.3], [3, 0.5], [3, 1.3], [1.7, 1]]) {
+          await setRange(page, '#did-ca', ca);
+          await setRange(page, '#did-kh', kh);
+          for (const vs of [5, 40]) {
+            await setRange(page, '#did-vs', vs);
+            await page.waitForTimeout(25);
+            await inspect(`case=${c} ca=${ca} kh=${kh} vs=${vs}`);
+          }
+        }
+        await setRange(page, '#did-vs', 25);
+      }
+    });
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/virtual-zero-reference/',
+                       ['#vzr-step', '#vzr-frf'], async (page, inspect) => {
+      await page.uncheck('#vzr-ref'); await inspect('reference off'); await page.check('#vzr-ref');
+    });
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/pi-current-regulator/',
+                       ['#pic-splane', '#pic-step']);
     await sweepLayout(browser, server.origin, report, tag);
     await browser.close();
   }

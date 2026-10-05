@@ -24,6 +24,46 @@ export const week1 = [
   },
 ];
 
+export const week6 = [
+  {
+    href: '/interactives/virtual-zero-reference/',
+    title: 'The Virtual Zero Reference',
+    lecture: 'W6L1',
+    blurb: 'A proportional current loop settles short of its command because the ' +
+           'winding resistance is a feedback gain with a command of zero. Two references, ' +
+           'one current, and it lands on their weighted average. Decouple the resistance ' +
+           'and the error is gone without an integrator — and so is some stiffness.',
+  },
+  {
+    href: '/interactives/pi-current-regulator/',
+    title: 'PI Current Regulation',
+    lecture: 'W6L2',
+    blurb: 'Controller zero on winding pole, and the loop is first order at the bandwidth ' +
+           'you asked for. Slide the zero either side and the locus shows where the second ' +
+           'pole goes: a slow tail one way, overshoot the other.',
+  },
+];
+
+export const week5 = [
+  {
+    href: '/interactives/input-decoupling/',
+    title: 'Manipulated Input Decoupling',
+    lecture: 'W5L1',
+    blurb: 'Two actuators either side of a body each push it and turn it. Invert the ' +
+           'geometry in the controller and one command moves only force, the other only ' +
+           'torque. A wrong length is a gain error; mismatched actuators are a transient ' +
+           'cross-coupling, and the null test tells the two apart.',
+  },
+  {
+    href: '/interactives/disturbance-decoupling/',
+    title: 'Disturbance and State Feedback Decoupling',
+    lecture: 'W5L2',
+    blurb: 'A car in a headwind on a hill. Drag is nonlinear feedback, so the eigenvalue ' +
+           'moves with speed unless the controller cancels it. Four controllers on one plot ' +
+           'of damping against operating speed: the flat line is the one you can predict.',
+  },
+];
+
 export const week4 = [
   {
     href: '/interactives/motor-transfer-matrix/',
@@ -102,6 +142,8 @@ export const week2 = [
 ];
 
 export const weeks = [
+  { week: 6, items: week6 },
+  { week: 5, items: week5 },
   { week: 4, items: week4 },
   { week: 3, items: week3 },
   { week: 2, items: week2 },

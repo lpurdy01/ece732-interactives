@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/DisturbanceDecoupling.astro';
+---
+
+<BaseLayout title="Disturbance and State Feedback Decoupling — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Disturbance and State Feedback Decoupling</h1>
+  <p class="lede">
+    Aerodynamic drag is feedback the air supplies, and because it goes as the
+    square of the speed, how strongly it acts depends on how fast you are
+    going. A slope and a headwind are disturbances you could measure. This
+    tool lets the controller add back each of those terms in turn, and shows
+    what that does to the one number that should not move with the operating
+    point: the eigenvalue.
+  </p>
+  <Widget />
+</BaseLayout>

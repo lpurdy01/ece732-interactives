@@ -1,0 +1,19 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/VirtualZeroReference.astro';
+---
+
+<BaseLayout title="The Virtual Zero Reference — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>The Virtual Zero Reference</h1>
+  <p class="lede">
+    A proportional current loop never quite reaches its command, and turning
+    the gain up only narrows the gap. The reason is that the winding
+    resistance is a feedback gain too, and it regulates toward a command of
+    zero. Two references pull on one current and it settles between them.
+    Decouple the resistance and the second reference is gone, with no
+    integrator in the controller.
+  </p>
+  <Widget />
+</BaseLayout>

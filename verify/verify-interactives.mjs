@@ -960,6 +960,194 @@ async function checkMotorStateFeedback(page, origin, report) {
 
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Weeks 5 and 6: decoupling, virtual zero references, current loops.  */
+/* Expected values are again computed here, not read back.             */
+
+async function checkInputDecoupling(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/input-decoupling/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#idc-c1', '#idc-c2']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`decoupling: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#idc-readout').innerText()).replace(/\s+/g, ' ');
+
+  let text = await read();
+  report.check('decoupling: ideal case passes the null test and is diagonal',
+               /Null test passes/.test(text) && /\bdiagonal\b/.test(text), text.slice(0, 200));
+  report.check('decoupling: closed form and RK4 agree', /the two agree/.test(text));
+
+  // Mismatched actuators: T(t) = (L/4)(e^-K2t - e^-K1t), peak at ln(K1/K2)/(K1-K2).
+  await page.click('#idc .presets button:nth-child(2)');
+  await page.waitForTimeout(80);
+  const L = 2, K1 = 10 ** 1.3, K2 = 10 ** 0.6;
+  const tp = Math.log(K1 / K2) / (K1 - K2);
+  const peak = (L / 4) * Math.abs(Math.exp(-K2 * tp) - Math.exp(-K1 * tp));
+  text = await read();
+  report.check('decoupling: transient cross-coupling peak matches the closed form',
+               text.includes(`${sig(peak)} N·m at t = ${sig(tp)} s`), `expect ${sig(peak)} at ${sig(tp)} | ${text.slice(150, 420)}`);
+  const measured = parseFloat((text.match(/\), ([\d.e-]+) N·m in the RK4 trace/) || [])[1] ?? 'NaN');
+  report.check('decoupling: RK4 peak within 1% of the closed form',
+               Math.abs(measured - peak) < 0.01 * peak, `RK4 ${measured}, exact ${peak}`);
+  report.check('decoupling: mismatch fails the null test but stays diagonal at DC',
+               /fails during the transient/.test(text) && /\bdiagonal\b/.test(text));
+  await shoot(page, 'decoupling-mismatch');
+
+  await page.click('#idc .presets button:nth-child(3)');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('decoupling: a short L̂ is a torque gain of L/L̂, not a coupling',
+               text.includes(`×${sig(1 / 0.8)}`) && /Null test passes/.test(text), text.slice(-200));
+
+  await page.click('#idc .presets button:nth-child(4)');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('decoupling: without B̂⁻¹ the map is cross-coupled',
+               /cross-coupled/.test(text) && !/Null test passes/.test(text), text.slice(0, 220));
+  const greyed = await page.locator('#idc .sysfig .is-off').count();
+  report.check('decoupling: the bypassed block greys out', greyed > 0, `${greyed} greyed`);
+  await shoot(page, 'decoupling-off');
+  report.check('decoupling: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkDisturbanceDecoupling(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/disturbance-decoupling/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#did-inv', '#did-sim']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`did: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#did-readout').innerText()).replace(/\s+/g, ' ');
+  // Defaults: v* = 25, v_w = 8, C_a = 10^1.7, k^ = k = 0.8.
+  const K = 0.8, vs = 25, vw = 8, Ca = 10 ** 1.7;
+
+  let text = await read();
+  report.check('did: full decoupling leaves D = C_a at every operating point',
+               text.includes(`D = ${sig(Ca)}`) && /operating-point invariant/.test(text), text.slice(0, 260));
+  report.check('did: full decoupling removes the wind coupling', /wind is decoupled/.test(text));
+  report.check('did: full decoupling holds v* through hill and wind',
+               (text.match(/the two agree/g) || []).length === 2 && /hill and headwind 25 m\/s/.test(text),
+               text.slice(260, 620));
+
+  // DID only: D = C_a + k(v_o + v_wo), N = k v_o; the hill is cancelled, so the
+  // hill speed is the cruise speed, the root of C_a(v* - v) = (k/2) v^2.
+  await page.selectOption('#did-case', '1');
+  await page.waitForTimeout(80);
+  text = await read();
+  const D = Ca + K * (vs + vw), N = K * vs;
+  report.check('did: DID-only damping is C_a + k(v_o + v_wo)', text.includes(`D = ${sig(D)}`), text.slice(0, 200));
+  report.check('did: DID-only wind coupling is k·v_o', text.includes(`${sig(N)} N·s/m`) && text.includes(`D/N = ${sig(D / N)}`),
+               text.slice(200, 420));
+  const cruise = (-Ca + Math.sqrt(Ca * Ca + 2 * K * Ca * vs)) / K;
+  report.check('did: DID-only hill speed equals the calm cruise speed',
+               (text.match(new RegExp(`${sig(cruise, 4).replace('.', '\\.')} m/s`, 'g')) || []).length >= 2,
+               `expect ${sig(cruise, 4)} twice | ${text.slice(380, 700)}`);
+  report.check('did: DID alone is not operating-point invariant', /varies ×/.test(text));
+  await shoot(page, 'did-disturbance-only');
+
+  // Economy model: D = C_a + k v_wo, N = k(v_o + v_wo).
+  await page.selectOption('#did-case', '2');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('did: velocity decoupling gives D = C_a + k·v_wo and N = k(v_o + v_wo)',
+               text.includes(`D = ${sig(Ca + K * vw)}`) && text.includes(`${sig(K * (vs + vw))} N·s/m`), text.slice(0, 420));
+
+  // Over-estimating k with a weak C_a makes the linearized loop unstable.
+  await setRange(page, '#did-ca', 0);
+  await setRange(page, '#did-kh', 1.3);
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('did: over-decoupling with small C_a is reported unstable', /unstable/.test(text), text.slice(0, 260));
+  report.check('did: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkVirtualZeroReference(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/virtual-zero-reference/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#vzr-step', '#vzr-frf']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`vzr: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#vzr-readout').innerText()).replace(/\s+/g, ' ');
+  // Defaults: Rp = 1, Lp = 10^-2.3, Ra = 4, no decoupling.
+  const Rp = 1, L = 10 ** -2.3, Ra = 4;
+
+  let text = await read();
+  report.check('vzr: undecoupled loop settles at Ra/(Ra+Rp)',
+               text.includes(`${sig(Ra / (Ra + Rp), 4)} A`) && text.includes(`error ${sig(100 * Rp / (Ra + Rp))}%`),
+               text.slice(0, 260));
+  report.check('vzr: bandwidth is (Ra+Rp)/(2πLp)', text.includes(`${sig((Ra + Rp) / (2 * Math.PI * L))} Hz`), text.slice(200, 420));
+  report.check('vzr: closed form and RK4 agree', /the two agree/.test(text));
+
+  await page.click('#vzr button[data-rh="1"]');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('vzr: exact decoupling tracks with zero error',
+               /settles at 1 A/.test(text) && /steady-state error 0% of the command/.test(text)
+               && /virtual zero reference is gone/.test(text), text.slice(0, 260));
+  report.check('vzr: exact decoupling costs Rp of DC stiffness',
+               text.includes(`${sig(Ra)} Ω ${sig(Ra + Rp)} Ω without decoupling`) && text.includes(`gave away ${sig(Rp)} Ω`),
+               text.slice(300, 560));
+  await shoot(page, 'vzr-decoupled');
+
+  await page.click('#vzr button[data-rh="1.2"]');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('vzr: over-decoupling settles above the command',
+               text.includes(`${sig(Ra / (Ra - 0.2 * Rp), 4)} A`) && /Over-decoupled/.test(text), text.slice(0, 200));
+
+  await setRange(page, '#vzr-ra', 0.1);
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('vzr: cancelling more resistance than exists is reported unstable',
+               /unstable/.test(text) && /does not settle/.test(text), text.slice(0, 200));
+  report.check('vzr: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkPICurrentRegulator(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/pi-current-regulator/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#pic-splane', '#pic-step']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`pi: ${sel} has ink`, ink.painted > 300, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#pic-readout').innerText()).replace(/\s+/g, ' ');
+  // Defaults: f = 1000 Hz, Rp = 1, Lp = 1e-3, tau_c = tau_e.
+  const f = 1000, R = 1, L = 1e-3, wd = 2 * Math.PI * f;
+
+  let text = await read();
+  report.check('pi: tuning rule gains are 2πf·Lp and 2πf·Rp',
+               text.includes(`${sig(wd * L)} V/A`) && text.includes(`${sig(wd * R)} V/(A·s)`), text.slice(0, 160));
+  report.check('pi: cancellation is announced', /pole-zero cancellation/.test(text));
+  // A first-order loop at f: -10 log10(1 + r^2) dB and -atan(r) at r = f/f_desired.
+  const fo = (r) => [`${sig(-10 * Math.log10(1 + r * r))} dB`, `${sig(-Math.atan(r) * 180 / Math.PI)}°`];
+  report.check('pi: cancelled loop is first order at a decade, two decades and the corner',
+               [0.01, 0.1, 1].every((r) => fo(r).every((s) => text.includes(s))),
+               `${[0.01, 0.1, 1].map(fo).join(' | ')} || ${text.slice(330, 560)}`);
+  report.check('pi: measured −3 dB bandwidth is the one asked for',
+               text.includes(`bandwidth ${sig(f)} Hz asked for ${sig(f)} Hz`), text.slice(300, 400));
+  report.check('pi: closed form and RK4 agree', /the two agree/.test(text), text.slice(-260));
+
+  // Off the rule: poles are the roots of L s^2 + (Kp + R) s + Ki with Ki = 2πf R / rho.
+  for (const [rho, expectOvershoot] of [[0.5, true], [1.5, false]]) {
+    await page.click(`#pic button[data-rho="${rho}"]`);
+    await page.waitForTimeout(80);
+    text = await read();
+    const b = (wd * L + R) / L, c = (wd * R / rho) / L;
+    const root = Math.sqrt(b * b / 4 - c);
+    report.check(`pi: closed-loop poles at τc = ${rho}τe match the quadratic`,
+                 text.includes(`${sig(-b / 2 + root)} and ${sig(-b / 2 - root)} rad/s`),
+                 `expect ${sig(-b / 2 + root)}, ${sig(-b / 2 - root)} | ${text.slice(200, 330)}`);
+    report.check(`pi: τc = ${rho}τe ${expectOvershoot ? 'overshoots' : 'does not overshoot'}`,
+                 expectOvershoot ? /overshoot [\d.]+%/.test(text) : /overshoot none/.test(text),
+                 text.slice(text.indexOf('step'), text.indexOf('step') + 150));
+    report.check(`pi: τc = ${rho}τe still agrees with RK4`, /the two agree/.test(text));
+    await shoot(page, `pi-rho-${rho}`);
+  }
+  report.check('pi: no console errors', errors.length === 0, errors.join(' | '));
+}
+
 /**
  * The figures above each tool: the device, and the same system as a block
  * diagram.
@@ -977,7 +1165,8 @@ async function checkMotorStateFeedback(page, origin, report) {
 const FIGURE_ROUTES = [
   'second-order-response', 'physical-active-feedback', 'dynamic-stiffness',
   'voltage-source-stiffness', 'eigenvalue-migration', 'motor-transfer-matrix',
-  'motor-state-feedback',
+  'motor-state-feedback', 'input-decoupling', 'disturbance-decoupling',
+  'virtual-zero-reference', 'pi-current-regulator',
 ];
 
 async function checkSystemFigures(page, origin, report) {
@@ -1067,7 +1256,9 @@ async function main() {
                             checkDiagramDecomposition, checkPhysicalActive, checkLinearization,
                             checkDynamicStiffness, checkVoltageSourceStiffness,
                             checkEigenvalueMigration, checkMotorTransferMatrix,
-                            checkMotorStateFeedback, checkSystemFigures]) {
+                            checkMotorStateFeedback, checkInputDecoupling,
+                            checkDisturbanceDecoupling, checkVirtualZeroReference,
+                            checkPICurrentRegulator, checkSystemFigures]) {
       const page = await ctx.newPage();
       await scenario(page, server.origin, report);
       await page.close();

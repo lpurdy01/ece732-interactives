@@ -1,0 +1,264 @@
+---
+// Manipulated input decoupling on a two-actuator body (W5L1, slides 15-30).
+//
+// Actuators go where they fit. Two of them a distance L apart each push the
+// body AND turn it, so neither actuator command is a command for a state:
+//
+//   [F]   [ 1     1  ] [F1]
+//   [T] = [L/2  -L/2 ] [F2]        = B [F1 F2]'
+//
+// The controller inverts the geometry with its own estimate, B^-1(L^), so that
+// one command moves only the net force and the other only the net torque:
+//
+//   F1* = F*/2 + T*/L^        F2* = F*/2 - T*/L^
+//
+// Two things can spoil that, and they spoil it differently:
+//
+//   wrong L^            B B^-1 stays diagonal; only the torque GAIN is off.
+//   unequal actuators   B diag(G1, G2) B^-1 is no longer diagonal, so a force
+//                       command produces a torque -- but only while G1 != G2,
+//                       i.e. during the transient. It dies away at DC.
+//
+// The test is the lecture's null test: command one state and watch the other
+// for anything other than zero. Each actuator is a first-order lag, so the
+// closed form is known and is drawn over an RK4 integration of the same
+// equations.
+import SystemFigures from './SystemFigures.astro';
+import { inputDecouplingFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="idc">
+  <SystemFigures {...inputDecouplingFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="L">L
+        <input type="range" id="idc-l" min="0.5" max="4" step="0.05" value="2" />
+        <output id="idc-l-v">2.00</output> m</label>
+      <label class="slider" data-sym="Lhat">L̂ / L
+        <input type="range" id="idc-lh" min="0.5" max="1.5" step="0.01" value="1" />
+        <output id="idc-lh-v">1.00</output></label>
+      <label class="slider" data-sym="Kb1">K<sub>b1</sub>
+        <input type="range" id="idc-k1" min="0" max="2" step="0.01" value="1.3" />
+        <output id="idc-k1-v">20.0</output> rad/s</label>
+      <label class="slider" data-sym="Kb2">K<sub>b2</sub>
+        <input type="range" id="idc-k2" min="0" max="2" step="0.01" value="1.3" />
+        <output id="idc-k2-v">20.0</output> rad/s</label>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="idc-on" checked /> decoupling B̂<sup>−1</sup> in the controller</label>
+    </div>
+    <div class="presets">
+      <button data-on="1" data-lh="1" data-k1="1.3" data-k2="1.3">ideal</button>
+      <button data-on="1" data-lh="1" data-k1="1.3" data-k2="0.6">actuator 2 slow</button>
+      <button data-on="1" data-lh="0.8" data-k1="1.3" data-k2="1.3">L̂ 20% short</button>
+      <button data-on="0" data-lh="1" data-k1="1.3" data-k2="1.3">no decoupling</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="idc-c1" role="img" aria-label="Net force and torque after a step in the first command"></canvas>
+      <figcaption id="idc-cap1">unit step in F*</figcaption>
+    </figure>
+    <figure>
+      <canvas id="idc-c2" role="img" aria-label="Net force and torque after a step in the second command"></canvas>
+      <figcaption id="idc-cap2">unit step in T*</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="idc-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+  import { bindFigureHighlight, setFigureActive, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('idc')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const lEl = q<HTMLInputElement>('#idc-l');
+  const lhEl = q<HTMLInputElement>('#idc-lh');
+  const k1El = q<HTMLInputElement>('#idc-k1');
+  const k2El = q<HTMLInputElement>('#idc-k2');
+  const onEl = q<HTMLInputElement>('#idc-on');
+  const canvases = [q<HTMLCanvasElement>('#idc-c1'), q<HTMLCanvasElement>('#idc-c2')];
+  const captions = [q<HTMLElement>('#idc-cap1'), q<HTMLElement>('#idc-cap2')];
+  const readout = q<HTMLDivElement>('#idc-readout');
+
+  const SIM_STEPS = 1200;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+  /** A matrix entry: anything below rounding noise prints as a clean zero. */
+  const entry = (x: number) => (Math.abs(x) < 1e-12 ? '0' : sig(x));
+
+  type Trace = Array<[number, number]>;
+
+  /**
+   * RK4 on the two actuator lags, dFi/dt = Kbi (ui - Fi), for constant
+   * actuator commands u. Returns the net force and net torque through B.
+   */
+  function simulate(u: [number, number], kb: [number, number], L: number, tEnd: number) {
+    const dt = tEnd / SIM_STEPS;
+    const f = [0, 0];
+    const force: Trace = [[0, 0]];
+    const torque: Trace = [[0, 0]];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      for (const j of [0, 1]) {
+        const slope = (x: number) => kb[j] * (u[j] - x);
+        const a = slope(f[j]);
+        const b = slope(f[j] + (dt / 2) * a);
+        const c = slope(f[j] + (dt / 2) * b);
+        const d = slope(f[j] + dt * c);
+        f[j] += (dt / 6) * (a + 2 * b + 2 * c + d);
+      }
+      force.push([n * dt, f[0] + f[1]]);
+      torque.push([n * dt, (L / 2) * (f[0] - f[1])]);
+    }
+    return { force, torque };
+  }
+
+  function draw() {
+    const L = parseFloat(lEl.value);
+    const ratio = parseFloat(lhEl.value);
+    const Lhat = ratio * L;
+    const kb: [number, number] = [Math.pow(10, parseFloat(k1El.value)), Math.pow(10, parseFloat(k2El.value))];
+    const on = onEl.checked;
+
+    q<HTMLOutputElement>('#idc-l-v').value = L.toFixed(2);
+    q<HTMLOutputElement>('#idc-lh-v').value = ratio.toFixed(2);
+    q<HTMLOutputElement>('#idc-k1-v').value = kb[0].toPrecision(3);
+    q<HTMLOutputElement>('#idc-k2-v').value = kb[1].toPrecision(3);
+    setFigureValues(root, {
+      L: `${L.toFixed(2)} m`,
+      Lhat: on ? `${Lhat.toFixed(2)} m` : 'bypassed',
+      Kb1: `${kb[0].toPrecision(3)} rad/s`,
+      Kb2: `${kb[1].toPrecision(3)} rad/s`,
+    });
+    setFigureActive(root, { Lhat: on });
+    lhEl.disabled = !on;
+
+    // Columns of the controller matrix: what each command asks of each actuator.
+    const M: [[number, number], [number, number]] = on
+      ? [[0.5, 1 / Lhat], [0.5, -1 / Lhat]]
+      : [[1, 0], [0, 1]];
+    const names = on ? ['F*', 'T*'] : ['F₁*', 'F₂*'];
+    const tEnd = 6 / Math.min(kb[0], kb[1]);
+    const colors = themeColors();
+
+    let maxGap = 0;
+    const finals: Array<[number, number]> = [];
+    const peaks: Array<[number, number]> = [];   // peak |F|, peak |T| in the RK4 trace
+
+    for (const c of [0, 1]) {
+      const u: [number, number] = [M[0][c], M[1][c]];
+      const { force, torque } = simulate(u, kb, L, tEnd);
+
+      // Closed form from the Laplace algebra: each lag answers a step with
+      // u (1 - e^(-Kb t)), and B adds and differences them.
+      const exact = (t: number) => {
+        const f1 = u[0] * (1 - Math.exp(-kb[0] * t));
+        const f2 = u[1] * (1 - Math.exp(-kb[1] * t));
+        return [f1 + f2, (L / 2) * (f1 - f2)];
+      };
+      const exactF: Trace = [], exactT: Trace = [];
+      for (let n = 0; n <= 300; n++) {
+        const t = (n / 300) * tEnd;
+        const [F, T] = exact(t);
+        exactF.push([t, F]); exactT.push([t, T]);
+        const j = Math.round((n / 300) * SIM_STEPS);
+        maxGap = Math.max(maxGap, Math.abs(F - force[j][1]), Math.abs(T - torque[j][1]));
+      }
+      finals.push([u[0] + u[1], (L / 2) * (u[0] - u[1])]);
+      peaks.push([Math.max(...force.map(([, y]) => Math.abs(y))),
+                  Math.max(...torque.map(([, y]) => Math.abs(y)))]);
+
+      const all = force.concat(torque).map(([, y]) => y);
+      let yLo = Math.min(0, ...all), yHi = Math.max(0, ...all);
+      const span = Math.max(yHi - yLo, 0.5);
+      yLo -= 0.14 * span; yHi += 0.14 * span;
+
+      const view = makeView(canvases[c], { xMin: 0, xMax: tEnd, yMin: yLo, yMax: yHi, pad: 38 });
+      drawAxes(view, {
+        xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd],
+        yTicks: [-1, -0.5, 0.5, 1].filter((v) => v > yLo && v < yHi),
+        xTickLabel: (v) => sig(v, 2),
+        xLabel: 't [s]', yLabel: 'N, N·m',
+      });
+      drawPolyline(view, force, colors.series[0], 4);
+      drawPolyline(view, torque, colors.series[1], 4);
+      drawPolyline(view, exactF, colors.ink, 1);
+      drawPolyline(view, exactT, colors.ink, 1);
+      const endF = force[SIM_STEPS][1], endT = torque[SIM_STEPS][1];
+      // Two traces that finish together would print their names on top of
+      // each other, so the second one steps down a line.
+      const clash = Math.abs(endF - endT) < 0.09 * (yHi - yLo);
+      label(view, 'F', [tEnd * 0.94, endF + 0.05 * (yHi - yLo)], colors.series[0]);
+      label(view, 'T', [tEnd * (clash ? 0.88 : 0.94), endT + 0.05 * (yHi - yLo)], colors.series[1]);
+      captions[c].textContent = `unit step in ${names[c]}`;
+    }
+
+    // Steady-state map from commands to states, B * M.
+    const G = [[finals[0][0], finals[1][0]], [finals[0][1], finals[1][1]]];
+    const diagonal = Math.abs(G[0][1]) < 1e-9 && Math.abs(G[1][0]) < 1e-9;
+
+    // Transient torque from a force command with decoupling on:
+    //   T(t) = (L/4) (e^(-Kb2 t) - e^(-Kb1 t)), largest at t = ln(Kb1/Kb2)/(Kb1-Kb2).
+    const matched = Math.abs(kb[0] - kb[1]) < 1e-9 * kb[0];
+    const tPeak = matched ? NaN : Math.log(kb[0] / kb[1]) / (kb[0] - kb[1]);
+    const peakExact = matched ? 0
+      : (L / 4) * Math.abs(Math.exp(-kb[1] * tPeak) - Math.exp(-kb[0] * tPeak));
+
+    let verdict: string;
+    if (!on) {
+      verdict = 'There is nothing to null: each command drives an actuator, and every actuator moves both states.';
+    } else if (matched && Math.abs(ratio - 1) < 1e-9) {
+      verdict = '<b>Null test passes.</b> F* moves only F and T* moves only T, at every instant.';
+    } else if (matched) {
+      verdict = `<b>Null test passes</b>, but T* is delivered at ×${sig(G[1][1])} — a wrong L̂ is a gain error on the torque axis, not a coupling.`;
+    } else {
+      verdict = `<b>Null test fails during the transient.</b> The steady-state map is still diagonal; the torque appears only while one actuator is ahead of the other.`;
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>geometry B</th>
+            <td>[ 1, 1 ]</td><td>[ ${sig(L / 2)}, ${sig(-L / 2)} ]</td></tr>
+        <tr><th>${on ? 'controller B̂⁻¹' : 'controller (none)'}</th>
+            <td>[ ${entry(M[0][0])}, ${entry(M[0][1])} ]</td><td>[ ${entry(M[1][0])}, ${entry(M[1][1])} ]</td></tr>
+        <tr><th>steady state, [F T]′ per unit command</th>
+            <td>[ ${entry(G[0][0])}, ${entry(G[0][1])} ]</td><td>[ ${entry(G[1][0])}, ${entry(G[1][1])} ]
+              ${diagonal ? '<span class="tag">diagonal</span>' : '<span class="tag">cross-coupled</span>'}</td></tr>
+        ${on ? `<tr><th>peak torque from a force command</th>
+            <td colspan="2">${matched ? '0 N·m — matched actuators leave nothing to see'
+              : `${sig(peakExact)} N·m at t = ${sig(tPeak)} s (closed form), ${sig(peaks[0][1])} N·m in the RK4 trace`}</td></tr>
+        <tr><th>peak force from a torque command</th>
+            <td colspan="2">${matched ? '0 N' : `${sig(peaks[1][0])} N in the RK4 trace`}</td></tr>` : ''}
+        <tr><th>closed form vs RK4</th>
+            <td colspan="2">${maxGap < 1e-6
+              ? `max difference <b>${maxGap.toExponential(1)}</b> — the two agree`
+              : `max difference ${maxGap.toExponential(2)}`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+  }
+
+  [lEl, lhEl, k1El, k2El].forEach((el) => el.addEventListener('input', draw));
+  onEl.addEventListener('change', draw);
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      onEl.checked = btn.dataset.on === '1';
+      lhEl.value = btn.dataset.lh!;
+      k1El.value = btn.dataset.k1!;
+      k2El.value = btn.dataset.k2!;
+      draw();
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

@@ -1,0 +1,323 @@
+---
+// Disturbance input decoupling and nonlinear state feedback decoupling on a
+// vehicle speed loop (W5L2, slides 21-29).
+//
+//   m dv/dt = f_m - (k/2)(v + v_w)^2 - W sin(theta),      k = Cd A rho
+//
+// Expanding the drag, (k/2)(v^2 + 2 v v_w + v_w^2), sorts its terms by what
+// they are: v^2 is state feedback, v_w^2 is a disturbance input, and v v_w is
+// both at once. The controller adds a damping gain and whichever of those
+// terms it is able to compute:
+//
+//   f_m = C_a (v* - v)  +  a (k^/2) v^2  +  b k^ v v_w  +  c (k^/2) v_w^2  +  s W sin(theta)
+//
+//   none      a b c s = 0 0 0 0     active damping only
+//   DID       a b c s = 0 0 1 1     the terms that are purely disturbances
+//   velocity  a b c s = 1 0 0 0     the term that needs only the speed sensor
+//   full      a b c s = 1 1 1 1
+//
+// Linearizing about (v_o, v_wo) gives  m d(dv)/dt = -D dv - N dv_w  with
+//
+//   D = C_a + k (v_o + v_wo) - a k^ v_o - b k^ v_wo        the eigenvalue is -D/m
+//   N =       k (v_o + v_wo) - b k^ v_o - c k^ v_wo        wind coupling
+//
+// and a dynamic stiffness dV_w/dV = -(m s + D)/N. The point of the lecture is
+// in D: unless the v-dependent terms are decoupled, the eigenvalue moves with
+// the operating point, and C_a has to be large enough to bury that movement.
+//
+// The simulation integrates the NONLINEAR equation; the steady speeds it
+// settles to are checked against the closed-form root of the same equation.
+import SystemFigures from './SystemFigures.astro';
+import { disturbanceDecouplingFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="did">
+  <SystemFigures {...disturbanceDecouplingFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider">controller
+        <select id="did-case">
+          <option value="0">active damping only</option>
+          <option value="1">+ disturbance input decoupling</option>
+          <option value="2">+ velocity decoupling only</option>
+          <option value="3" selected>+ full decoupling</option>
+        </select></label>
+      <label class="slider" data-sym="vs">v*
+        <input type="range" id="did-vs" min="5" max="40" step="0.5" value="25" />
+        <output id="did-vs-v">25.0</output> m/s</label>
+      <label class="slider" data-sym="vw">v<sub>w</sub>
+        <input type="range" id="did-vw" min="0" max="15" step="0.5" value="8" />
+        <output id="did-vw-v">8.0</output> m/s</label>
+      <label class="slider" data-sym="th">θ
+        <input type="range" id="did-th" min="0" max="6" step="0.1" value="3" />
+        <output id="did-th-v">3.0</output>°</label>
+      <label class="slider" data-sym="Ca">C<sub>a</sub>
+        <input type="range" id="did-ca" min="0" max="3" step="0.02" value="1.7" />
+        <output id="did-ca-v">50.1</output> N·s/m</label>
+      <label class="slider" data-sym="khat">k̂ / k
+        <input type="range" id="did-kh" min="0.5" max="1.3" step="0.01" value="1" />
+        <output id="did-kh-v">1.00</output></label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="did-inv" role="img" aria-label="Effective damping against operating speed, for each controller"></canvas>
+      <figcaption>effective damping D against operating speed, all four controllers</figcaption>
+    </figure>
+    <figure>
+      <canvas id="did-sim" role="img" aria-label="Vehicle speed through a hill and then a headwind"></canvas>
+      <figcaption>speed through a hill, then a headwind (nonlinear model)</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="did-readout"></div>
+</div>
+
+<script>
+  import { makeView, drawAxes, drawPolyline, label, themeColors } from '../lib/plot';
+  import { bindFigureHighlight, setFigureActive, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('did')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+
+  const caseEl = q<HTMLSelectElement>('#did-case');
+  const vsEl = q<HTMLInputElement>('#did-vs');
+  const vwEl = q<HTMLInputElement>('#did-vw');
+  const thEl = q<HTMLInputElement>('#did-th');
+  const caEl = q<HTMLInputElement>('#did-ca');
+  const khEl = q<HTMLInputElement>('#did-kh');
+  const invCanvas = q<HTMLCanvasElement>('#did-inv');
+  const simCanvas = q<HTMLCanvasElement>('#did-sim');
+  const readout = q<HTMLDivElement>('#did-readout');
+
+  const M = 1500;          // kg
+  const K = 0.8;           // Cd A rho, kg/m
+  const W = M * 9.81;      // N
+  const V_LO = 5, V_HI = 40;
+  const SIM_STEPS = 2400;
+  const T_HILL = 0.15, T_GUST = 0.55;   // fractions of the window
+
+  /** [a, b, c, s]: which terms the controller adds back. */
+  const CASES: Array<[number, number, number, number]> = [
+    [0, 0, 0, 0], [0, 0, 1, 1], [1, 0, 0, 0], [1, 1, 1, 1],
+  ];
+  const CASE_NAME = ['active damping only', 'disturbance input decoupling',
+                     'velocity decoupling only', 'full decoupling'];
+  const CASE_SHORT = ['none', 'DID', 'velocity', 'full'];
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+
+  const damping = (cs: number[], Ca: number, kh: number, vo: number, vwo: number) =>
+    Ca + K * (vo + vwo) - cs[0] * kh * vo - cs[1] * kh * vwo;
+  const coupling = (cs: number[], kh: number, vo: number, vwo: number) =>
+    K * (vo + vwo) - cs[1] * kh * vo - cs[2] * kh * vwo;
+
+  /** Net force on the vehicle: the right-hand side of m dv/dt. */
+  function net(cs: number[], Ca: number, kh: number, vs: number, v: number, vw: number, sinTh: number) {
+    const fm = Ca * (vs - v) + cs[0] * 0.5 * kh * v * v + cs[1] * kh * v * vw
+      + cs[2] * 0.5 * kh * vw * vw + cs[3] * W * sinTh;
+    return fm - 0.5 * K * (v + vw) * (v + vw) - W * sinTh;
+  }
+
+  /**
+   * Steady speed in closed form. Setting the net force to zero leaves a
+   * quadratic A2 v^2 + A1 v + A0 = 0; the physical root is the one the net
+   * force slopes downward through. NaN when there is no such root.
+   */
+  function steady(cs: number[], Ca: number, kh: number, vs: number, vw: number, sinTh: number) {
+    const A2 = 0.5 * (cs[0] * kh - K);
+    const A1 = -Ca - K * vw + cs[1] * kh * vw;
+    const A0 = Ca * vs - 0.5 * (K - cs[2] * kh) * vw * vw - (1 - cs[3]) * W * sinTh;
+    if (Math.abs(A2) < 1e-12) return A1 < 0 ? -A0 / A1 : NaN;
+    const disc = A1 * A1 - 4 * A2 * A0;
+    if (disc < 0) return NaN;
+    for (const r of [(-A1 + Math.sqrt(disc)) / (2 * A2), (-A1 - Math.sqrt(disc)) / (2 * A2)]) {
+      if (2 * A2 * r + A1 < 0) return r;
+    }
+    return NaN;
+  }
+
+  function draw() {
+    const ci = parseInt(caseEl.value, 10);
+    const cs = CASES[ci];
+    const vs = parseFloat(vsEl.value);
+    const vw = parseFloat(vwEl.value);
+    const thDeg = parseFloat(thEl.value);
+    const sinTh = Math.sin((thDeg * Math.PI) / 180);
+    const Ca = Math.pow(10, parseFloat(caEl.value));
+    const kh = parseFloat(khEl.value) * K;
+
+    q<HTMLOutputElement>('#did-vs-v').value = vs.toFixed(1);
+    q<HTMLOutputElement>('#did-vw-v').value = vw.toFixed(1);
+    q<HTMLOutputElement>('#did-th-v').value = thDeg.toFixed(1);
+    q<HTMLOutputElement>('#did-ca-v').value = Ca.toPrecision(3);
+    q<HTMLOutputElement>('#did-kh-v').value = (kh / K).toFixed(2);
+    setFigureValues(root, {
+      Ca: `${Ca.toPrecision(3)} N·s/m`,
+      khat: ci === 0 ? 'off' : `${CASE_SHORT[ci]}, k̂ = ${(kh / K).toFixed(2)}k`,
+    });
+    setFigureActive(root, { khat: ci !== 0 });
+    khEl.disabled = ci === 0;
+
+    const colors = themeColors();
+
+    /* ---------------- invariance: D against operating speed ---------------- */
+
+    const curves = CASES.map((c) => {
+      const pts: Array<[number, number]> = [];
+      for (let n = 0; n <= 70; n++) {
+        const vo = V_LO + (n / 70) * (V_HI - V_LO);
+        pts.push([vo, damping(c, Ca, kh, vo, vw)]);
+      }
+      return pts;
+    });
+    const ys = curves.flat().map(([, y]) => y);
+    const dMax = Math.max(...ys, 1);
+    let dLo = Math.min(0, ...ys), dHi = dMax;
+    const dSpan = dHi - dLo;
+    dLo -= 0.1 * dSpan; dHi += 0.14 * dSpan;
+
+    const iv = makeView(invCanvas, { xMin: 0, xMax: V_HI + 2, yMin: dLo, yMax: dHi, pad: 38 });
+    drawAxes(iv, {
+      xTicks: [10, 20, 30, 40], yTicks: [dMax / 2, dMax],
+      yTickLabel: (v) => sig(v, 2),
+      xLabel: 'v_o [m/s]', yLabel: 'D [N·s/m]',
+    });
+    drawPolyline(iv, [[vs, dLo], [vs, dHi]], colors.muted, 1, [4, 3]);
+    label(iv, 'v*', [vs + 0.5, dLo + 0.06 * (dHi - dLo)], colors.muted);
+    // Two controllers can share a line (with k̂ = k and no wind, several do),
+    // so each name is nudged down until it is clear of the ones already placed.
+    const placed: number[] = [];
+    const minGap = 0.055 * (dHi - dLo);
+    curves.forEach((pts, n) => {
+      const mine = n === ci;
+      drawPolyline(iv, pts, mine ? colors.accent : colors.series[n], mine ? 3 : 1.4, mine ? [] : [5, 3]);
+      let y = pts[pts.length - 1][1];
+      while (placed.some((p) => Math.abs(p - y) < minGap)) y -= minGap;
+      placed.push(y);
+      label(iv, CASE_SHORT[n], [V_HI + 1.5, y + 0.02 * (dHi - dLo)], mine ? colors.accent : colors.series[n], 'right');
+    });
+
+    /* ---------------- nonlinear run: cruise, hill, gust ---------------- */
+
+    const D = damping(cs, Ca, kh, vs, vw);
+    const N = coupling(cs, kh, vs, vw);
+    const stable = D > 0;
+    // Slowest damping the run will meet sets how long it needs to settle.
+    const dSlow = Math.min(damping(cs, Ca, kh, vs, 0), D);
+    const tau = stable && dSlow > 0 ? M / dSlow : NaN;
+    const wanted = 16 * tau;
+    const tEnd = isFinite(wanted) ? Math.min(Math.max(wanted, 30), 900) : 120;
+    const capped = !isFinite(wanted) || wanted > 900;
+
+    const vCruise = steady(cs, Ca, kh, vs, 0, 0);
+    const vHill = steady(cs, Ca, kh, vs, 0, sinTh);
+    const vGust = steady(cs, Ca, kh, vs, vw, sinTh);
+
+    const dt = tEnd / SIM_STEPS;
+    let v = isFinite(vCruise) ? vCruise : vs;
+    let diverged = false;
+    const trace: Array<[number, number]> = [[0, v]];
+    const at = (t: number): [number, number] =>
+      [t >= T_GUST * tEnd ? vw : 0, t >= T_HILL * tEnd ? sinTh : 0];
+    for (let n = 1; n <= SIM_STEPS; n++) {
+      const t = (n - 1) * dt;
+      const f = (tt: number, x: number) => {
+        const [w, s] = at(tt);
+        return net(cs, Ca, kh, vs, x, w, s) / M;
+      };
+      const k1 = f(t, v);
+      const k2 = f(t + dt / 2, v + (dt / 2) * k1);
+      const k3 = f(t + dt / 2, v + (dt / 2) * k2);
+      const k4 = f(t + dt, v + dt * k3);
+      v += (dt / 6) * (k1 + 2 * k2 + 2 * k3 + k4);
+      if (!(v > -20 && v < 120)) { diverged = true; v = Math.min(Math.max(v, -20), 120); }
+      trace.push([n * dt, v]);
+    }
+    const sample = (frac: number) => trace[Math.round(frac * SIM_STEPS) - 1][1];
+    const simHill = sample(T_GUST), simGust = trace[SIM_STEPS][1];
+
+    const vsAll = trace.map(([, y]) => y).concat([vs]);
+    let yLo = Math.min(...vsAll), yHi = Math.max(...vsAll);
+    const ySpan = Math.max(yHi - yLo, 1);
+    yLo -= 0.2 * ySpan; yHi += 0.2 * ySpan;
+    const sv = makeView(simCanvas, { xMin: 0, xMax: tEnd, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd],
+      yTicks: [vs],
+      xTickLabel: (x) => sig(x, 2), yTickLabel: (y) => sig(y, 3),
+      xLabel: 't [s]', yLabel: 'v [m/s]', origin: false,
+    });
+    drawPolyline(sv, [[0, vs], [tEnd, vs]], colors.muted, 1, [4, 4]);
+    for (const [frac, text] of [[T_HILL, 'hill'], [T_GUST, 'headwind']] as Array<[number, string]>) {
+      drawPolyline(sv, [[frac * tEnd, yLo], [frac * tEnd, yHi]], colors.muted, 1, [3, 3]);
+      label(sv, text, [frac * tEnd + tEnd * 0.012, yHi - 0.09 * (yHi - yLo)], colors.muted);
+    }
+    drawPolyline(sv, trace, colors.accent, 2.5);
+
+    /* ---------------- readout ---------------- */
+
+    // How far the eigenvalue travels across the whole envelope the sliders
+    // allow: every speed, with and without the headwind.
+    let envLo = Infinity, envHi = -Infinity;
+    for (const vo of [V_LO, V_HI]) for (const w of [0, vw]) {
+      const d = damping(cs, Ca, kh, vo, w);
+      envLo = Math.min(envLo, d); envHi = Math.max(envHi, d);
+    }
+    const invariant = Math.abs(envHi - envLo) < 1e-9 * Math.max(Math.abs(envHi), 1);
+    const spread = envLo > 0 ? `×${sig(envHi / envLo)}` : 'through zero';
+
+    const settled = (sim: number, exact: number) =>
+      isFinite(exact) && Math.abs(sim - exact) < 0.002 * vs;
+    const speedRow = (name: string, exact: number, sim: number | null) => {
+      if (!isFinite(exact)) return `<tr><th>${name}</th><td colspan="2">no stable steady speed</td></tr>`;
+      const check = sim === null ? ''
+        : settled(sim, exact) ? ` — RK4 ends at ${sig(sim, 4)}, the two agree`
+        : ` — RK4 is at ${sig(sim, 4)} and has not settled in this window`;
+      return `<tr><th>${name}</th><td>${sig(exact, 4)} m/s</td>
+              <td>${sig(vs - exact)} m/s below v*${check}</td></tr>`;
+    };
+
+    const law = ['C<sub>a</sub>(v* − v)',
+      ci === 1 || ci === 3 ? '½k̂v<sub>w</sub>² + W sin θ' : '',
+      ci === 2 || ci === 3 ? '½k̂v²' : '',
+      ci === 3 ? 'k̂v·v<sub>w</sub>' : ''].filter(Boolean).join(' + ');
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>${CASE_NAME[ci]}</th><td colspan="2">f<sub>m</sub> = ${law}</td></tr>
+        <tr><th>at v* with the headwind</th>
+            <td>D = <b>${sig(D)}</b> N·s/m</td>
+            <td>${stable ? `eigenvalue ${sig(-D / M)} rad/s, τ = ${sig(M / D)} s`
+                         : '<span class="tag">unstable</span> eigenvalue in the right half plane'}</td></tr>
+        <tr><th>D across 5–40 m/s, wind on and off</th>
+            <td>${sig(envLo)} to ${sig(envHi)}</td>
+            <td>${invariant ? '<span class="tag">operating-point invariant</span>' : `varies ${spread}`}</td></tr>
+        <tr><th>wind coupling N</th>
+            <td>${Math.abs(N) < 1e-9 ? '0' : sig(N)} N·s/m</td>
+            <td>stiffness to wind at DC, D/N = ${Math.abs(N) < 1e-9 ? '∞ — wind is decoupled' : sig(D / N)}</td></tr>
+        ${speedRow('cruise, flat and calm', vCruise, null)}
+        ${speedRow(`on the ${thDeg.toFixed(1)}° hill`, vHill, simHill)}
+        ${speedRow('hill and headwind', vGust, simGust)}
+      </table>
+      <p class="note">
+        ${diverged ? 'The run left the plotted range: this operating point is unstable. ' : ''}
+        ${capped && !diverged ? 'The window is capped at 900 s, which is shorter than this loop needs to settle. ' : ''}
+        Fixed here: m = ${M} kg, k = C<sub>d</sub>Aρ = ${K} kg/m, and the slope term uses the true weight.
+        The motor force is not limited, so a large C<sub>a</sub> is free in this model in a way it is not in a car.
+      </p>`;
+  }
+
+  [vsEl, vwEl, thEl, caEl, khEl].forEach((el) => el.addEventListener('input', draw));
+  caseEl.addEventListener('change', draw);
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>
