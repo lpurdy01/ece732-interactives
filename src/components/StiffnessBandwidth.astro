@@ -1,0 +1,516 @@
+---
+// Dynamic stiffness, bandwidth and the Bode plot (W7L1 slides 16-28,
+// W7L2 slides 19-21).
+//
+// The same shaft as MotionStiffnessTuning, but here the sliders are the three
+// gains themselves and the bandwidths are what comes out. With the commands at
+// zero the load sees
+//
+//   T_L/theta = -(J s^2 + (b_p + b_a) s + K_sa + K_isa/s)
+//
+// whose four terms are four lines on log-log axes. Where two of them cross is
+// fixed by the gains:
+//
+//   f_v  = (b_p + b_a) / (2 pi J)       J w^2 meets (b_p + b_a) w
+//   f_p  = K_sa / (2 pi (b_p + b_a))    (b_p + b_a) w meets K_sa
+//   f_ip = K_isa / (2 pi K_sa)          K_sa meets K_isa / w
+//
+// The second plot puts the same frequencies on Bode magnitude plots:
+//
+//   velocity loop closed alone  Omega/Omega* = b_a / (J s + b_p + b_a)
+//                               a first-order lag with its corner at f_v
+//   position loop, open, with   L = (K_sa + K_isa/s) / (s (J s + b_p + b_a))
+//   the velocity loop inside    which crosses 1 near f_p
+//   closed loop                 theta/theta* = N(s) / D(s),
+//                               D = J s^3 + (b_p + b_a) s^2 + K_sa s + K_isa,
+//                               N = b_a s^2 + K_sa s + K_isa with omega*,
+//                               N = K_sa s + K_isa without it
+//
+// and the stiffness plot flips to compliance |theta/T_L| = 1/|DS|, which is
+// itself a Bode magnitude plot: the load-to-position response.
+//
+// Both time responses are exact. The closed loop, augmented with a constant
+// load state or a sine/cosine oscillator for the command, is advanced with
+// the matrix exponential. The sine run is read back by least squares and set
+// beside |N/D| at f_c, so the Bode plot and the time trace can be compared
+// number for number.
+import SystemFigures from './SystemFigures.astro';
+import { sfbCommandFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="sbw">
+  <SystemFigures {...sfbCommandFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="fv" title="velocity loop gain (active damping)">b<sub>a</sub>
+        <input type="range" id="sbw-ba" min="-5" max="0" step="any" value="-2.2" />
+        <output id="sbw-ba-v">6.27e-3</output> N·m·s/rad</label>
+      <label class="slider" data-sym="fp" title="position loop gain (active stiffness)">K<sub>sa</sub>
+        <input type="range" id="sbw-ks" min="-3" max="2" step="any" value="-0.7" />
+        <output id="sbw-ks-v">0.197</output> N·m/rad</label>
+      <label class="slider" data-sym="fip" title="integrated position loop gain (integrated stiffness)">K<sub>isa</sub>
+        <input type="range" id="sbw-ki" min="-4" max="3" step="any" value="-0.9" />
+        <output id="sbw-ki-v">0.124</output> N·m/(rad·s)</label>
+      <label class="slider" data-sym="J">J<sub>p</sub>
+        <input type="range" id="sbw-j" min="-6" max="-3" step="0.05" value="-5" />
+        <output id="sbw-j-v">1e-5</output> kg·m²</label>
+      <label class="slider" data-sym="bp">b<sub>p</sub>
+        <input type="range" id="sbw-bp" min="-6" max="-2" step="0.05" value="-5" />
+        <output id="sbw-bp-v">1e-5</output> N·m·s/rad</label>
+      <label class="slider" data-sym="fc" title="frequency of the sine command">f<sub>c</sub>
+        <input type="range" id="sbw-fc" min="-1" max="2.5" step="0.001" value="1" />
+        <output id="sbw-fc-v">10</output> Hz</label>
+    </div>
+    <div class="toggles">
+      <label data-sym="wstar"><input type="checkbox" id="sbw-wstar" checked /> give the velocity command ω*</label>
+      <label><input type="checkbox" id="sbw-flip" /> draw the stiffness upside down, as compliance |θ/T<sub>L</sub>|</label>
+    </div>
+    <div class="presets">
+      <button data-f="100,5,0.1">gains for 100 / 5 / 0.1 Hz</button>
+      <button data-f="400,15,0.1">gains for 400 / 15 / 0.1 Hz</button>
+      <button data-f="100,30,10">loops crowded: 100 / 30 / 10 Hz</button>
+      <button data-f="100,5,150">f<sub>ip</sub> above f<sub>v</sub></button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="sbw-ds" role="img" aria-label="Dynamic stiffness against frequency with its four asymptotes, their crossings, and which term dominates"></canvas>
+      <figcaption id="sbw-ds-cap">|T<sub>L</sub>/θ| (N·m/rad), log-log. The coloured band shows which term is largest; ▲ are the closed-loop poles</figcaption>
+    </figure>
+    <figure>
+      <canvas id="sbw-bode" role="img" aria-label="Bode magnitudes of the velocity loop, the position loop gain, and the closed loop with and without the velocity command"></canvas>
+      <figcaption>Bode magnitudes on the same frequency axis, log-log; dotted lines at f<sub>ip</sub>, f<sub>p</sub>, f<sub>v</sub></figcaption>
+    </figure>
+  </div>
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="sbw-step" role="img" aria-label="Shaft angle after a one newton-metre load step, on a log time axis"></canvas>
+      <figcaption>θ(t) after a 1 N·m load step, log time axis; dotted lines at 1/2πf for each crossing</figcaption>
+    </figure>
+    <figure>
+      <canvas id="sbw-sine" role="img" aria-label="Commanded and measured angle over three periods of a sine command, once the start-up has settled"></canvas>
+      <figcaption id="sbw-sine-cap">θ* = sin 2πf<sub>c</sub>t (thin) and θ, three periods once the start-up has settled</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="sbw-readout"></div>
+</div>
+
+<style>
+  /* The units on these sliders are long (N·m/(rad·s)); the shared 190px
+     minimum column leaves the label wider than its cell at tablet width. */
+  .param-grid { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+</style>
+
+<script>
+  import { type Cx, cAbs, cDiv, polyEval, polyRoots, expm, matVec } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors, decades, decadeLabel, type View } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues, setFigureActive } from '../lib/figure-sync';
+
+  const root = document.getElementById('sbw')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+  const baEl = q<HTMLInputElement>('#sbw-ba');
+  const ksEl = q<HTMLInputElement>('#sbw-ks');
+  const kiEl = q<HTMLInputElement>('#sbw-ki');
+  const jEl = q<HTMLInputElement>('#sbw-j');
+  const bpEl = q<HTMLInputElement>('#sbw-bp');
+  const fcEl = q<HTMLInputElement>('#sbw-fc');
+  const wstarEl = q<HTMLInputElement>('#sbw-wstar');
+  const flipEl = q<HTMLInputElement>('#sbw-flip');
+  const dsCanvas = q<HTMLCanvasElement>('#sbw-ds');
+  const bodeCanvas = q<HTMLCanvasElement>('#sbw-bode');
+  const stepCanvas = q<HTMLCanvasElement>('#sbw-step');
+  const sineCanvas = q<HTMLCanvasElement>('#sbw-sine');
+  const readout = q<HTMLDivElement>('#sbw-readout');
+
+  const TWO_PI = 2 * Math.PI;
+  const SQRT1_2 = Math.SQRT1_2;
+  const STEP_SAMPLES = 320;
+  const SINE_SAMPLES = 360;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+  const hz = (z: Cx) => (Math.abs(z[1]) < 1e-9 * Math.max(1, cAbs(z))
+    ? sig(z[0] / TWO_PI) : `${sig(z[0] / TWO_PI)} ± j${sig(Math.abs(z[1]) / TWO_PI)}`);
+  const pow10 = (el: HTMLInputElement) => Math.pow(10, parseFloat(el.value));
+  const jw = (f: number): Cx => [0, TWO_PI * f];
+
+  /** Bisection in log f for the frequency where g(f) crosses `level` going down. */
+  function crossDown(g: (f: number) => number, level: number, lo: number, hi: number): number {
+    if (!(g(Math.pow(10, lo)) > level) || !(g(Math.pow(10, hi)) < level)) return NaN;
+    for (let it = 0; it < 80; it++) {
+      const mid = (lo + hi) / 2;
+      if (g(Math.pow(10, mid)) > level) lo = mid; else hi = mid;
+    }
+    return Math.pow(10, (lo + hi) / 2);
+  }
+
+  /** First frequency, scanning up, where g falls below level for good enough to see. */
+  function firstBelow(g: (f: number) => number, level: number, lo: number, hi: number): number {
+    const N = 2000;
+    let prev = lo;
+    for (let n = 1; n <= N; n++) {
+      const lf = lo + ((hi - lo) * n) / N;
+      if (g(Math.pow(10, lf)) < level) return crossDown(g, level, prev, lf);
+      prev = lf;
+    }
+    return NaN;
+  }
+
+  function draw() {
+    const ba = pow10(baEl), Ks = pow10(ksEl), Ki = pow10(kiEl);
+    const J = pow10(jEl), bp = pow10(bpEl), fc = pow10(fcEl);
+    const withW = wstarEl.checked, flip = flipEl.checked;
+    const B = bp + ba;
+
+    q<HTMLOutputElement>('#sbw-ba-v').value = sig(ba);
+    q<HTMLOutputElement>('#sbw-ks-v').value = sig(Ks);
+    q<HTMLOutputElement>('#sbw-ki-v').value = sig(Ki);
+    q<HTMLOutputElement>('#sbw-j-v').value = J.toExponential(1);
+    q<HTMLOutputElement>('#sbw-bp-v').value = bp.toExponential(1);
+    q<HTMLOutputElement>('#sbw-fc-v').value = sig(fc);
+    setFigureValues(root, {
+      J: `${J.toExponential(1)} kg·m²`, bp: `${bp.toExponential(1)}`,
+      fv: `${sig(ba)} N·m·s/rad`, fp: `${sig(Ks)} N·m/rad`, fip: `${sig(Ki)} N·m/(rad·s)`,
+    });
+    root.querySelectorAll('.sysfig').forEach((fig) => setFigureActive(fig, { wstar: withW }));
+
+    // The crossings, straight from the gains.
+    const fv = B / (TWO_PI * J), fp = Ks / (TWO_PI * B), fip = Ki / (TWO_PI * Ks);
+    const order = fip < fp && fp < fv;
+
+    const colors = themeColors();
+    const C = { I: colors.series[0], K: colors.series[1], B: colors.series[3], J: colors.series[2] };
+    const den = [J, B, Ks, Ki];
+    const numW = [ba, Ks, Ki], num0 = [0, Ks, Ki];
+    const poles = polyRoots(den);
+    const stable = poles.every((p) => p[0] < -1e-6 * cAbs(p));
+    const complex = poles.some((p) => Math.abs(p[1]) > 1e-9 * cAbs(p));
+
+    const H = (num: number[], f: number) => cDiv(polyEval(num, jw(f)), polyEval(den, jw(f)));
+    const magW = (f: number) => cAbs(H(numW, f));
+    const mag0 = (f: number) => cAbs(H(num0, f));
+    const velLoop = (f: number) => ba / Math.hypot(B, J * TWO_PI * f);
+    const posLoop = (f: number) => {
+      const w = TWO_PI * f;
+      return Math.hypot(Ks, Ki / w) / (w * Math.hypot(B, J * w));
+    };
+
+    /* ---------------- frequency range shared by both plots ---------------- */
+    const marks = [fip, fp, fv, fc].filter((v) => isFinite(v) && v > 0).map(Math.log10);
+    const F_LO = Math.floor(Math.min(...marks) - 1.2);
+    const F_HI = Math.ceil(Math.max(...marks) + 1.2);
+    const NF = 500;
+    const lfs = Array.from({ length: NF + 1 }, (_, n) => F_LO + ((F_HI - F_LO) * n) / NF);
+
+    /* ---------------- dynamic stiffness ---------------- */
+    const sgn = flip ? -1 : 1;
+    const terms = (f: number) => {
+      const w = TWO_PI * f;
+      return { I: Ki / w, K: Ks, B: B * w, J: J * w * w };
+    };
+    const total: Array<[number, number]> = [];
+    const asym = { I: [] as Array<[number, number]>, K: [] as Array<[number, number]>,
+                   B: [] as Array<[number, number]>, J: [] as Array<[number, number]> };
+    const dominant: string[] = [];
+    let dsMin = Infinity, fMin = NaN;
+    for (const lf of lfs) {
+      const f = Math.pow(10, lf), w = TWO_PI * f;
+      const ds = Math.hypot(Ks - J * w * w, B * w - Ki / w);
+      if (ds < dsMin) { dsMin = ds; fMin = f; }
+      total.push([lf, sgn * Math.log10(ds)]);
+      const t = terms(f);
+      for (const k of ['I', 'K', 'B', 'J'] as const) asym[k].push([lf, sgn * Math.log10(t[k])]);
+      dominant.push((['I', 'K', 'B', 'J'] as const).reduce((a, b) => (t[b] > t[a] ? b : a)));
+    }
+    const ysT = total.map(([, y]) => y);
+    const yLo = Math.floor(Math.min(...ysT) - (flip ? 1.0 : 1.6));
+    const yHi = Math.ceil(Math.max(...ysT) + (flip ? 1.6 : 0.2));
+    const clip = (pts: Array<[number, number]>) => pts.filter(([, y]) => y >= yLo - 0.5 && y <= yHi + 0.5);
+    const dv = makeView(dsCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(dv, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi).filter((e, i, a) => a.length < 9 || i % 2 === 0),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel, xLabel: 'f [Hz]',
+      yLabel: flip ? '|θ/TL| = 1/|DS|' : '|TL/θ|', origin: false,
+    });
+    guides(dv, [fip, fp, fv], yLo, yHi, C, colors.muted);
+    drawPolyline(dv, clip(asym.I), C.I, 1.2, [5, 3]);
+    drawPolyline(dv, clip(asym.K), C.K, 1.2, [5, 3]);
+    drawPolyline(dv, clip(asym.B), C.B, 1.2, [5, 3]);
+    drawPolyline(dv, clip(asym.J), C.J, 1.2, [5, 3]);
+    drawPolyline(dv, total, colors.accent, 2.4);
+    // Rings where the asymptotes cross.
+    const ring = (lf: number, y: number, col: string) => {
+      if (!isFinite(lf) || y < yLo || y > yHi) return;
+      dv.ctx.save(); dv.ctx.strokeStyle = col; dv.ctx.lineWidth = 2;
+      dv.ctx.beginPath(); dv.ctx.arc(dv.x(lf), dv.y(y), 6, 0, TWO_PI); dv.ctx.stroke(); dv.ctx.restore();
+    };
+    ring(Math.log10(fv), sgn * Math.log10(J * (TWO_PI * fv) ** 2), C.B);
+    ring(Math.log10(fp), sgn * Math.log10(Ks), C.K);
+    ring(Math.log10(fip), sgn * Math.log10(Ks), C.I);
+    // Which term is largest, as a band along the bottom, named by the loop it belongs to.
+    const bandY0 = yLo + 0.05, bandY1 = yLo + 0.28;
+    const names: Record<string, string> = { I: 'integral', K: 'position', B: 'velocity', J: 'inertia' };
+    let start = 0;
+    for (let n = 1; n <= NF + 1; n++) {
+      if (n === NF + 1 || dominant[n] !== dominant[start]) {
+        const x0 = dv.x(lfs[start]), x1 = dv.x(lfs[Math.min(n, NF)]);
+        dv.ctx.save();
+        dv.ctx.fillStyle = C[dominant[start] as 'I' | 'K' | 'B' | 'J'];
+        dv.ctx.globalAlpha = 0.35;
+        dv.ctx.fillRect(x0, dv.y(bandY1), x1 - x0, dv.y(bandY0) - dv.y(bandY1));
+        dv.ctx.globalAlpha = 1;
+        if (x1 - x0 > 56) {
+          dv.ctx.fillStyle = colors.ink; dv.ctx.font = '11px ui-monospace, monospace'; dv.ctx.textAlign = 'center';
+          dv.ctx.fillText(names[dominant[start]], (x0 + x1) / 2, dv.y(bandY0) - 3);
+        }
+        dv.ctx.restore();
+        start = n;
+      }
+    }
+    for (const p of poles) {
+      if (p[1] < 0) continue;
+      const lf = Math.log10(cAbs(p) / TWO_PI);
+      if (lf > F_LO && lf < F_HI) label(dv, '▲', [lf, bandY1 + 0.05], colors.ink, 'center');
+    }
+    // Name each asymptote where it leaves the frame, as the lecture's plot does.
+    const yIn = (y: number) => Math.min(yHi - 0.3, Math.max(bandY1 + 0.4, y));
+    const lw = (f: number) => Math.log10(TWO_PI * Math.pow(10, f));
+    label(dv, 'Kisa/ω', [F_LO + 0.1, yIn(sgn * (Math.log10(Ki) - lw(F_LO + 0.1)) + 0.2)], C.I);
+    label(dv, 'Ksa', [F_HI - 0.1, yIn(sgn * Math.log10(Ks) + 0.2)], C.K, 'right');
+    label(dv, '(bp+ba)ω', [F_HI - 0.1, yIn(sgn * (Math.log10(B) + lw(F_HI - 0.1)) - 0.45)], C.B, 'right');
+    const lfJ = Math.min(F_HI - 0.1, ((flip ? -(yLo + 0.6) : yHi - 0.6) - Math.log10(J) - 2 * Math.log10(TWO_PI)) / 2);
+    label(dv, 'Jω²', [lfJ - 0.15, yIn(sgn * (Math.log10(J) + 2 * lw(lfJ)))], C.J, 'right');
+
+    /* ---------------- Bode magnitudes ---------------- */
+    const BY_LO = -3, BY_HI = 2;
+    const bv = makeView(bodeCanvas, { xMin: F_LO, xMax: F_HI, yMin: BY_LO, yMax: BY_HI, pad: 38 });
+    drawAxes(bv, { xTicks: decades(F_LO, F_HI), yTicks: decades(BY_LO, BY_HI), xTickLabel: decadeLabel,
+                   yTickLabel: decadeLabel, xLabel: 'f [Hz]', yLabel: 'magnitude', origin: false });
+    guides(bv, [fip, fp, fv], BY_LO, BY_HI, C, colors.muted);
+    drawPolyline(bv, [[F_LO, 0], [F_HI, 0]], colors.muted, 1);
+    drawPolyline(bv, [[F_LO, Math.log10(SQRT1_2)], [F_HI, Math.log10(SQRT1_2)]], colors.muted, 1, [2, 3]);
+    const curve = (g: (f: number) => number) =>
+      lfs.map((lf) => [lf, Math.log10(g(Math.pow(10, lf)))] as [number, number])
+         .filter(([, y]) => isFinite(y) && y >= BY_LO - 0.3 && y <= BY_HI + 0.3);
+    drawPolyline(bv, curve(velLoop), C.B, 1.6);
+    drawPolyline(bv, curve(posLoop), C.K, 1.6);
+    drawPolyline(bv, curve(mag0), colors.accent, withW ? 1.2 : 2.6, [6, 4]);
+    drawPolyline(bv, curve(magW), colors.accent, withW ? 2.6 : 1.2);
+    const fVel = crossDown((f) => (velLoop(f) * B) / ba, SQRT1_2, F_LO - 3, F_HI + 3);   // relative to its DC gain b_a/(b_p+b_a)
+    const fPos = crossDown(posLoop, 1, F_LO - 4, F_HI + 4);
+    const bwW = firstBelow(magW, SQRT1_2, F_LO - 3, F_HI + 3);
+    const bw0 = firstBelow(mag0, SQRT1_2, F_LO - 3, F_HI + 3);
+    const bring = (f: number, y: number, col: string) => {
+      if (!(f > 0) || !isFinite(y)) return;
+      const lf = Math.log10(f), ly = Math.log10(y);
+      if (lf < F_LO || lf > F_HI || ly < BY_LO || ly > BY_HI) return;
+      bv.ctx.save(); bv.ctx.strokeStyle = col; bv.ctx.lineWidth = 2;
+      bv.ctx.beginPath(); bv.ctx.arc(bv.x(lf), bv.y(ly), 6, 0, TWO_PI); bv.ctx.stroke(); bv.ctx.restore();
+    };
+    bring(fVel, velLoop(fVel), C.B);
+    bring(fPos, 1, C.K);
+    const Hc = H(withW ? numW : num0, fc);
+    const lfc = Math.log10(fc), lyc = Math.log10(cAbs(Hc));
+    if (lyc > BY_LO && lyc < BY_HI) {
+      bv.ctx.save(); bv.ctx.fillStyle = colors.ink;
+      bv.ctx.beginPath(); bv.ctx.arc(bv.x(lfc), bv.y(lyc), 4.5, 0, TWO_PI); bv.ctx.fill(); bv.ctx.restore();
+      label(bv, 'fc', [lfc, lyc + 0.18], colors.ink, 'center');
+    }
+    legend(bv, [
+      [C.B, [], 'Ω/Ω*, velocity loop alone'],
+      [C.K, [], '|L|, position loop, open'],
+      [colors.accent, [], 'θ/θ* with ω*'],
+      [colors.accent, [6, 4], 'θ/θ* without ω*'],
+    ], colors.ink, 46, bv.height - 38 - 4 * 15);
+
+    /* ---------------- load step: exact ---------------- */
+    const A3 = [[0, 1, 0], [0, 0, 1], [-Ki / J, -Ks / J, -B / J]];
+    const B3 = [0, 0, -1 / J];
+    const stepAt = (t: number) => {
+      const M = [[...A3[0], B3[0]], [...A3[1], B3[1]], [...A3[2], B3[2]], [0, 0, 0, 0]];
+      return matVec(expm(M.map((row) => row.map((v) => v * t))), [0, 0, 0, 1])[1];
+    };
+    const fast = Math.max(...poles.map(cAbs));
+    const slow = Math.min(...poles.map((p) => Math.max(Math.abs(p[0]), 1e-12)));
+    const growth = Math.max(...poles.map((p) => p[0]));
+    const ringing = poles.filter((p) => Math.abs(p[1]) > 1e-9 * cAbs(p) && -p[0] < 0.02 * cAbs(p));
+    const wantStep = stable ? 8 / slow : Math.min(40 / fast, 20 / Math.max(growth, 1e-12));
+    const tEnd = Math.min(wantStep, 2e4 / fast, ...ringing.map((p) => (50 * TWO_PI) / Math.abs(p[1])));
+    const stepCapped = stable && wantStep > tEnd * (1 + 1e-9);
+    const t0 = 0.05 / fast;
+    const stepPts: Array<[number, number]> = [];
+    let peak = 0, tPeak = NaN;
+    for (let k = 0; k < STEP_SAMPLES; k++) {
+      const t = t0 * Math.pow(tEnd / t0, k / (STEP_SAMPLES - 1));
+      const th = stepAt(t);
+      if (Math.abs(th) > Math.abs(peak)) { peak = th; tPeak = t; }
+      stepPts.push([Math.log10(t), th]);
+    }
+    const thFinal = stepPts[stepPts.length - 1][1];
+    const ysS = stepPts.map(([, y]) => y);
+    const sMin = Math.min(0, ...ysS), sMax = Math.max(0, ...ysS), sSpan = (sMax - sMin) || 1;
+    const sv = makeView(stepCanvas, { xMin: Math.log10(t0), xMax: Math.log10(tEnd),
+                                      yMin: sMin - 0.1 * sSpan, yMax: sMax + 0.1 * sSpan, pad: 38 });
+    drawAxes(sv, { xTicks: decades(Math.log10(t0), Math.log10(tEnd)), xTickLabel: decadeLabel,
+                   yTicks: [sMin, sMax].filter((v) => Math.abs(v) > 0.05 * sSpan), yTickLabel: (v) => sig(v, 2),
+                   xLabel: 't [s]', yLabel: 'θ [rad]', origin: false });
+    drawPolyline(sv, [[Math.log10(t0), 0], [Math.log10(tEnd), 0]], colors.muted, 1, [4, 4]);
+    drawPolyline(sv, stepPts, colors.accent, 2);
+    // The three loop time constants, as markers on the time axis.
+    for (const [f, col] of [[fv, C.B], [fp, C.K], [fip, C.I]] as Array<[number, string]>) {
+      const lt = Math.log10(1 / (TWO_PI * f));
+      if (lt > Math.log10(t0) && lt < Math.log10(tEnd)) {
+        drawPolyline(sv, [[lt, sMin - 0.1 * sSpan], [lt, sMax + 0.1 * sSpan]], col, 1, [2, 4]);
+      }
+    }
+
+    /* ---------------- sine command: exact ---------------- */
+    const wc = TWO_PI * fc, g = withW ? 1 : 0;
+    // x = [int(theta* - theta), theta, omega, cos, sin]; theta* = sin, omega* = wc cos.
+    const M5 = [
+      [0, -1, 0, 0, 1],
+      [0, 0, 1, 0, 0],
+      [Ki / J, -Ks / J, -B / J, (g * ba * wc) / J, Ks / J],
+      [0, 0, 0, 0, -wc],
+      [0, 0, 0, wc, 0],
+    ];
+    const period = 1 / fc;
+    // Start the window once the slowest pole has decayed by e^-12, but no
+    // later than the matrix exponential can reach in one accurate step.
+    const wantSine = stable ? 12 / slow : 0;
+    const tS = stable ? Math.min(wantSine, 2e5 / fast) : 0;
+    const sineCapped = stable && wantSine > tS * (1 + 1e-9);
+    const span = stable ? 3 * period : Math.min(3 * period, 20 / Math.max(growth, 1e-12));
+    const h = span / SINE_SAMPLES;
+    let x = matVec(expm(M5.map((r) => r.map((v) => v * tS))), [0, 0, 0, 1, 0]);
+    const Eh = expm(M5.map((r) => r.map((v) => v * h)));
+    const ts: number[] = [], th: number[] = [], cmd: number[] = [], cosv: number[] = [];
+    for (let k = 0; k <= SINE_SAMPLES; k++) {
+      ts.push(tS + k * h); th.push(x[1]); cmd.push(x[4]); cosv.push(x[3]);
+      x = matVec(Eh, x);
+    }
+    // Least squares over whole periods: theta = a sin + b cos + c, with the
+    // oscillator's own sin and cos as the basis.
+    let fitRatio = NaN, fitPhase = NaN;
+    if (stable) {
+      const S = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (let k = 0; k < SINE_SAMPLES; k++) {
+        const basis = [cmd[k], cosv[k], 1];
+        for (let i = 0; i < 3; i++) { r[i] += basis[i] * th[k]; for (let j = 0; j < 3; j++) S[i][j] += basis[i] * basis[j]; }
+      }
+      const det3 = (m: number[][]) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+      const d = det3(S);
+      const col = (i: number) => S.map((row, k) => row.map((v, j) => (j === i ? r[k] : v)));
+      const a = det3(col(0)) / d, b = det3(col(1)) / d;
+      fitRatio = Math.hypot(a, b);
+      fitPhase = Math.atan2(b, a) * 180 / Math.PI;
+    }
+    const allY = [...th, ...cmd].filter(isFinite);
+    const yMx = Math.max(1, ...allY.map(Math.abs)) * 1.1;
+    const nv = makeView(sineCanvas, { xMin: ts[0], xMax: ts[ts.length - 1], yMin: -yMx, yMax: yMx, pad: 38 });
+    drawAxes(nv, { xTicks: [], yTicks: [-1, 0, 1].filter((v) => Math.abs(v) <= yMx), yTickLabel: (v) => sig(v, 2),
+                   xLabel: `t [s], from ${sig(ts[0])}`, yLabel: 'θ*, θ [rad]', origin: false });
+    drawPolyline(nv, ts.map((t, k) => [t, cmd[k]] as [number, number]), colors.muted, 1.2);
+    drawPolyline(nv, ts.map((t, k) => [t, th[k]] as [number, number]), colors.accent, 2.2);
+
+    /* ---------------- readout ---------------- */
+    const HcPhase = Math.atan2(Hc[1], Hc[0]) * 180 / Math.PI;
+    const agree = stable && Math.abs(fitRatio - cAbs(Hc)) < 1e-3 * Math.max(cAbs(Hc), 1e-6)
+      && Math.abs(((fitPhase - HcPhase + 540) % 360) - 180) < 0.1;
+    const routh = B * Ks - J * Ki;
+    let verdict: string;
+    if (!stable) {
+      verdict = `Unstable. Routh for J<sub>p</sub>s³ + (b<sub>p</sub>+b<sub>a</sub>)s² + K<sub>sa</sub>s + K<sub>isa</sub> needs (b<sub>p</sub> + b<sub>a</sub>)K<sub>sa</sub> − J<sub>p</sub>K<sub>isa</sub> > 0; here it is ${sig(routh)}. Written with the crossings, that quantity is 2πJ<sub>p</sub>K<sub>sa</sub>(f<sub>v</sub> − f<sub>ip</sub>), so the condition is exactly f<sub>ip</sub> &lt; f<sub>v</sub>: f<sub>ip</sub> = ${sig(fip)} Hz, f<sub>v</sub> = ${sig(fv)} Hz.`;
+    } else if (!order) {
+      verdict = 'The crossings are out of order (f<sub>ip</sub> &lt; f<sub>p</sub> &lt; f<sub>v</sub> does not hold), so at least one loop has no frequency range where its term is the largest. The band under the stiffness plot shows which loops are missing.';
+    } else if (complex) {
+      verdict = 'Stable, crossings in order, but two poles have joined into a complex pair: the loops are too close for each crossing to stand for one pole.';
+    } else {
+      verdict = 'Crossings in order and the poles real. Compare each crossing with the pole beside it, and with the Bode readings above.';
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>crossings, from the gains</th>
+            <td>f<sub>v</sub> = (b<sub>p</sub> + b<sub>a</sub>)/2πJ<sub>p</sub> = <b>${sig(fv)}</b> Hz</td>
+            <td>f<sub>p</sub> = K<sub>sa</sub>/2π(b<sub>p</sub> + b<sub>a</sub>) = <b>${sig(fp)}</b> Hz</td>
+            <td>f<sub>ip</sub> = K<sub>isa</sub>/2πK<sub>sa</sub> = <b>${sig(fip)}</b> Hz</td></tr>
+        <tr><th>closed-loop poles</th><td colspan="3">${[...poles].sort((p1, p2) => cAbs(p2) - cAbs(p1)).filter((p) => p[1] >= 0).map(hz).join(', ')} Hz</td></tr>
+        <tr><th>Bode readings</th>
+            <td>velocity loop alone: −3 dB at <b>${sig(fVel)}</b> Hz</td>
+            <td>position loop |L| = 1 at <b>${sig(fPos)}</b> Hz</td>
+            <td>stiffness floor ${sig(dsMin)} N·m/rad at ${sig(fMin)} Hz</td></tr>
+        <tr><th>θ/θ* −3 dB</th>
+            <td>with ω*: <b>${isFinite(bwW) ? sig(bwW) : '—'}</b> Hz</td>
+            <td>without ω*: <b>${isFinite(bw0) ? sig(bw0) : '—'}</b> Hz</td><td></td></tr>
+        <tr><th>at f<sub>c</sub> = ${sig(fc)} Hz, ${withW ? 'with' : 'without'} ω*</th>
+            <td>Bode: |θ/θ*| = ${sig(cAbs(Hc))}, ${sig(HcPhase)}°</td>
+            <td>${stable ? `time trace: ${sig(fitRatio)}, ${sig(fitPhase)}°` : 'time trace: grows'}</td>
+            <td>${!stable ? '' : agree ? 'the two agree' : sineCapped ? 'start-up not settled in this window' : 'differ'}</td></tr>
+        <tr><th>1 N·m load step</th>
+            <td>peak θ = ${sig(peak)} rad at ${sig(tPeak)} s</td>
+            <td colspan="2">${!stable ? 'does not settle' : stepCapped
+              ? `still ${sig(thFinal)} rad when this window ends at ${sig(tEnd)} s — not settled`
+              : `θ = ${sig(thFinal)} rad at ${sig(tEnd)} s`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+    q('#sbw-ds-cap').innerHTML = flip
+      ? '|θ/T<sub>L</sub>| = 1/|DS| (rad/N·m), log-log: the same curve upside down, which is the Bode magnitude of the load-to-position response'
+      : '|T<sub>L</sub>/θ| (N·m/rad), log-log. The coloured band shows which term is largest; ▲ are the closed-loop poles';
+  }
+
+  function guides(v: View, fs: number[], lo: number, hi: number, C: Record<string, string>, muted: string) {
+    const cols = [C.I, C.K, C.B], names = ['f_ip', 'f_p', 'f_v'];
+    fs.forEach((f, i) => {
+      const lf = Math.log10(f);
+      if (!isFinite(lf)) return;
+      drawPolyline(v, [[lf, lo], [lf, hi]], cols[i] ?? muted, 1, [2, 4]);
+      label(v, names[i], [lf, hi - 0.15 - 0.22 * i], cols[i] ?? muted, 'center');
+    });
+  }
+
+  function legend(v: View, rows: Array<[string, number[], string]>, ink: string, x0: number, y0: number) {
+    const { ctx } = v;
+    ctx.save();
+    ctx.font = '11px ui-monospace, monospace';
+    rows.forEach(([col, dash, text], i) => {
+      const y = y0 + i * 15;
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(x0, y - 4); ctx.lineTo(x0 + 22, y - 4); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = ink; ctx.textAlign = 'left';
+      ctx.fillText(text, x0 + 28, y);
+    });
+    ctx.restore();
+  }
+
+  /** Gains that put the crossings at fv, fp, fip for the plant on the sliders. */
+  function applyBandwidths(fv: number, fp: number, fip: number) {
+    const J = pow10(jEl), bp = pow10(bpEl);
+    const ba = Math.max(J * TWO_PI * fv - bp, Math.pow(10, parseFloat(baEl.min)));
+    const Ks = (bp + ba) * TWO_PI * fp, Ki = Ks * TWO_PI * fip;
+    const set = (el: HTMLInputElement, v: number) => {
+      el.value = String(Math.min(parseFloat(el.max), Math.max(parseFloat(el.min), Math.log10(v))));
+    };
+    set(baEl, ba); set(ksEl, Ks); set(kiEl, Ki);
+    draw();
+  }
+
+  [baEl, ksEl, kiEl, jEl, bpEl, fcEl, wstarEl, flipEl].forEach((el) => el.addEventListener('input', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const [v, p, i] = btn.dataset.f!.split(',').map(Number);
+      applyBandwidths(v, p, i);
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  applyBandwidths(100, 5, 0.1);
+</script>

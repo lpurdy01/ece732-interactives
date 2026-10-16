@@ -1,0 +1,325 @@
+---
+// Tuning a state feedback motion controller by its dynamic stiffness (W7L1,
+// slides 16-24).
+//
+// Inside the torque loop's bandwidth the motor is an inertia and a bearing
+// drag. Three state feedback gains act on omega, theta and the integral of
+// theta, and with the commands at zero the load torque sees
+//
+//   T_L/theta = -(J s^2 + (b_p + b_a) s + K_sa + K_isa/s)
+//
+// On log-log axes the four terms are four straight lines: J w^2, (b_p+b_a) w,
+// K_sa and K_isa/w. Each loop's bandwidth is put where its line meets the one
+// above it, which gives the tuning rule
+//
+//   b_a = J w_v - b_p,   K_sa = (b_p + b_a) w_p,   K_isa = K_sa w_ip
+//
+// The tool applies that rule to the three bandwidths on the sliders, draws the
+// stiffness with its asymptotes, and reports where the closed-loop poles
+// actually land -- near the asked-for bandwidths when they are a decade
+// apart, and somewhere else when they are not. The load step is integrated by
+// RK4 on the three states and drawn over the exact solution (matrix
+// exponential of the augmented system), on a log time axis because the peak
+// and the recovery are decades apart.
+import SystemFigures from './SystemFigures.astro';
+import { motionTuneFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="mst">
+  <SystemFigures {...motionTuneFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="fv">velocity loop f<sub>v</sub>
+        <input type="range" id="mst-fv" min="1" max="2.7" step="0.001" value="2" />
+        <output id="mst-fv-v">100</output> Hz</label>
+      <label class="slider" data-sym="fp">position loop f<sub>p</sub>
+        <input type="range" id="mst-fp" min="-0.3" max="2" step="0.001" value="0.699" />
+        <output id="mst-fp-v">5</output> Hz</label>
+      <label class="slider" data-sym="fip">integrated position f<sub>ip</sub>
+        <input type="range" id="mst-fip" min="-1.3" max="1" step="0.001" value="-1" />
+        <output id="mst-fip-v">0.1</output> Hz</label>
+      <label class="slider" data-sym="J">J<sub>p</sub>
+        <input type="range" id="mst-j" min="-6" max="-3" step="0.05" value="-5" />
+        <output id="mst-j-v">1e-5</output> kg·m²</label>
+      <label class="slider" data-sym="bp">b<sub>p</sub>
+        <input type="range" id="mst-bp" min="-6" max="-2" step="0.05" value="-5" />
+        <output id="mst-bp-v">1e-5</output> N·m·s/rad</label>
+    </div>
+    <div class="presets">
+      <button data-f="100,5,0.1">100 / 5 / 0.1 Hz</button>
+      <button data-f="100,5,0.2">double f<sub>ip</sub></button>
+      <button data-f="100,10,0.1">double f<sub>p</sub></button>
+      <button data-f="200,5,0.1">double f<sub>v</sub></button>
+      <button data-f="20,6,2">loops crowded</button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="mst-frf" role="img" aria-label="Dynamic stiffness magnitude against frequency, with its four asymptotes"></canvas>
+      <figcaption>|T<sub>L</sub>/θ| (N·m/rad), log-log: total, asymptotes, and the bare shaft dashed</figcaption>
+    </figure>
+    <figure>
+      <canvas id="mst-step" role="img" aria-label="Shaft angle after a one newton-metre load step, on a log time axis"></canvas>
+      <figcaption>θ(t) after a 1 N·m load step, log time axis</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="mst-readout"></div>
+</div>
+
+<script>
+  import { type Cx, cAbs, polyRoots, expm, matVec } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors, decades, decadeLabel } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('mst')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+  const fvEl = q<HTMLInputElement>('#mst-fv');
+  const fpEl = q<HTMLInputElement>('#mst-fp');
+  const fipEl = q<HTMLInputElement>('#mst-fip');
+  const jEl = q<HTMLInputElement>('#mst-j');
+  const bpEl = q<HTMLInputElement>('#mst-bp');
+  const frfCanvas = q<HTMLCanvasElement>('#mst-frf');
+  const stepCanvas = q<HTMLCanvasElement>('#mst-step');
+  const readout = q<HTMLDivElement>('#mst-readout');
+
+  const TWO_PI = 2 * Math.PI;
+  const SAMPLES = 360;      // log-spaced samples kept from the RK4 run
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+  const hz = (z: Cx) => (Math.abs(z[1]) < 1e-9 * Math.max(1, cAbs(z))
+    ? sig(z[0] / TWO_PI) : `${sig(z[0] / TWO_PI)} ± j${sig(Math.abs(z[1]) / TWO_PI)}`);
+
+  /** |T_L/theta| at f Hz. */
+  function stiffness(f: number, J: number, B: number, Ks: number, Ki: number): number {
+    const w = TWO_PI * f;
+    return Math.hypot(Ks - J * w * w, B * w - Ki / w);
+  }
+
+  /** x = [int theta, theta, omega]; T_em = -b_a w - K_sa theta - K_isa int theta. */
+  function system(J: number, bp: number, ba: number, Ks: number, Ki: number) {
+    const A = [[0, 1, 0], [0, 0, 1], [-Ki / J, -Ks / J, -(bp + ba) / J]];
+    const B = [0, 0, -1 / J];                 // input: T_L
+    return { A, B };
+  }
+
+  /** Exact: expm of the system augmented with the constant input. */
+  function exactAt(A: number[][], B: number[], TL: number, t: number): number {
+    const M = [[...A[0], B[0]], [...A[1], B[1]], [...A[2], B[2]], [0, 0, 0, 0]];
+    const E = expm(M.map((row) => row.map((v) => v * t)));
+    return matVec(E, [0, 0, 0, TL])[1];
+  }
+
+  /**
+   * RK4 with a step that grows with t: small while the fast pole is still
+   * ringing, capped at 0.2/|fastest pole|: inside RK4's stability region, and
+   * small enough that a lightly damped pair near the Routh boundary does not
+   * drift in phase over the window. A fixed step small
+   * enough for the start would take millions of steps to reach the integrator.
+   */
+  function rk4(A: number[][], B: number[], TL: number, tEnd: number, fast: number, hCap: number, keep: number[]) {
+    const f = (x: number[]) => {
+      const d = matVec(A, x);
+      return d.map((v, i) => v + B[i] * TL);
+    };
+    let x = [0, 0, 0], t = 0, k = 0;
+    const out: Array<[number, number]> = [];
+    while (t < tEnd && k < keep.length) {
+      const dt = Math.min(hCap, Math.max(0.05 / fast, 0.02 * t));
+      const a = f(x);
+      const b = f(x.map((v, j) => v + (dt / 2) * a[j]));
+      const c = f(x.map((v, j) => v + (dt / 2) * b[j]));
+      const d = f(x.map((v, j) => v + dt * c[j]));
+      x = x.map((v, j) => v + (dt / 6) * (a[j] + 2 * b[j] + 2 * c[j] + d[j]));
+      t += dt;
+      while (k < keep.length && t >= keep[k]) { out.push([t, x[1]]); k++; }
+    }
+    return out;
+  }
+
+  function draw() {
+    const fv = Math.pow(10, parseFloat(fvEl.value));
+    const fp = Math.pow(10, parseFloat(fpEl.value));
+    const fip = Math.pow(10, parseFloat(fipEl.value));
+    const J = Math.pow(10, parseFloat(jEl.value));
+    const bp = Math.pow(10, parseFloat(bpEl.value));
+    const [wv, wp, wi] = [fv, fp, fip].map((f) => TWO_PI * f);
+
+    const ba = J * wv - bp;
+    const B = bp + ba;
+    const Ks = B * wp;
+    const Ki = Ks * wi;
+
+    q<HTMLOutputElement>('#mst-fv-v').value = sig(fv);
+    q<HTMLOutputElement>('#mst-fp-v').value = sig(fp);
+    q<HTMLOutputElement>('#mst-fip-v').value = sig(fip);
+    q<HTMLOutputElement>('#mst-j-v').value = J.toExponential(1);
+    q<HTMLOutputElement>('#mst-bp-v').value = bp.toExponential(1);
+    setFigureValues(root, {
+      J: `${J.toExponential(1)} kg·m²`,
+      bp: `${bp.toExponential(1)}`,
+      fv: `${sig(ba)} N·m·s/rad`,
+      fp: `${sig(Ks)} N·m/rad`,
+      fip: `${sig(Ki)} N·m/(rad·s)`,
+    });
+
+    const colors = themeColors();
+    const poles = polyRoots([J, B, Ks, Ki]);
+    // A pole within a part in a million of the imaginary axis never decays on
+    // any window this page can integrate, so it counts as not stable.
+    const stable = poles.every((p) => p[0] < -1e-6 * cAbs(p));
+    const marginal = !poles.some((p) => p[0] > 1e-6 * cAbs(p)) && !stable;
+    const complex = poles.some((p) => Math.abs(p[1]) > 1e-9 * cAbs(p));
+
+    /* ---------------- dynamic stiffness ---------------- */
+    const F_LO = Math.floor(Math.log10(fip) - 1.3);
+    const F_HI = Math.ceil(Math.log10(fv) + 1.3);
+    const total: Array<[number, number]> = [], bare: Array<[number, number]> = [];
+    const asym = { J: [] as Array<[number, number]>, B: [] as Array<[number, number]>,
+                   K: [] as Array<[number, number]>, I: [] as Array<[number, number]> };
+    let dsMin = Infinity, fMin = NaN;
+    for (let n = 0; n <= 500; n++) {
+      const lf = F_LO + ((F_HI - F_LO) * n) / 500;
+      const f = Math.pow(10, lf), w = TWO_PI * f;
+      const ds = stiffness(f, J, B, Ks, Ki);
+      if (ds < dsMin) { dsMin = ds; fMin = f; }
+      total.push([lf, Math.log10(ds)]);
+      bare.push([lf, Math.log10(Math.hypot(J * w * w, bp * w))]);
+      asym.J.push([lf, Math.log10(J * w * w)]);
+      asym.B.push([lf, Math.log10(Math.abs(B) * w)]);
+      asym.K.push([lf, Math.log10(Math.abs(Ks))]);
+      asym.I.push([lf, Math.log10(Math.abs(Ki) / w)]);
+    }
+    const yLo = Math.floor(Math.log10(dsMin) - 1.5);
+    const yHi = Math.ceil(Math.max(...total.map(([, y]) => y)));
+    const clip = (pts: Array<[number, number]>) => pts.filter(([, y]) => y >= yLo - 0.5 && y <= yHi + 0.5);
+    const fv_ = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv_, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi).filter((e, i, a) => a.length < 9 || i % 2 === 0),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel, xLabel: 'f [Hz]', yLabel: '|TL/θ|', origin: false,
+    });
+    for (const [lf, name] of [[Math.log10(fip), 'f_ip'], [Math.log10(fp), 'f_p'], [Math.log10(fv), 'f_v']] as const) {
+      drawPolyline(fv_, [[lf, yLo], [lf, yHi]], colors.muted, 1, [2, 4]);
+      label(fv_, name, [lf, yLo + 0.25], colors.muted, 'center');
+    }
+    drawPolyline(fv_, clip(asym.I), colors.series[0], 1, [5, 3]);
+    drawPolyline(fv_, clip(asym.K), colors.series[1], 1, [5, 3]);
+    drawPolyline(fv_, clip(asym.B), colors.series[3], 1, [5, 3]);
+    drawPolyline(fv_, clip(asym.J), colors.series[2], 1, [5, 3]);
+    drawPolyline(fv_, clip(bare), colors.muted, 1.4, [7, 4]);
+    drawPolyline(fv_, total, colors.accent, 2.4);
+    label(fv_, 'Kisa/ω', [F_LO + 0.1, Math.min(yHi - 0.3, Math.log10(Ki / (TWO_PI * Math.pow(10, F_LO + 0.1))) + 0.2)], colors.series[0]);
+    label(fv_, 'Ksa', [Math.log10(fp) - 0.05, Math.log10(Ks) + 0.2], colors.series[1], 'right');
+    label(fv_, 'Jω²', [F_HI - 0.1, Math.min(yHi - 0.3, Math.log10(J * Math.pow(TWO_PI * Math.pow(10, F_HI - 0.1), 2)))], colors.series[2], 'right');
+
+    /* ---------------- load step ---------------- */
+    const { A, B: Bv } = system(J, bp, ba, Ks, Ki);
+    const fast = Math.max(...poles.map(cAbs));
+    const slow = Math.min(...poles.map((p) => Math.max(Math.abs(p[0]), 1e-12)));
+    // Long enough for the slowest pole, but capped: near the Routh boundary
+    // (f_v close to f_ip) the slowest pole barely decays at all.
+    // A lightly damped pair (zeta < 0.02) rings for thousands of cycles before
+    // it decays, and any explicit integrator drifts in phase over that many.
+    // Such a window stops after 50 of its cycles, says so, and RK4 takes
+    // steps four times smaller so the comparison still means something.
+    const ringing = poles.filter((p) => Math.abs(p[1]) > 1e-9 * cAbs(p) && -p[0] < 0.02 * cAbs(p));
+    const want = stable ? 8 / slow : 40 / fast;
+    const tEnd = Math.min(want, 2e4 / fast,
+                          ...ringing.map((p) => (50 * TWO_PI) / Math.abs(p[1])));
+    const capped = want > tEnd * (1 + 1e-9);
+    const hCap = (ringing.length ? 0.05 : 0.2) / fast;
+    const t0 = 0.05 / fast;
+    const keep = Array.from({ length: SAMPLES }, (_, k) => t0 * Math.pow(tEnd / t0, k / (SAMPLES - 1)));
+    const numeric = rk4(A, Bv, 1, tEnd, fast, hCap, keep);
+    let maxGap = 0, peak = 0, tPeak = NaN;
+    const exact: Array<[number, number]> = numeric.map(([t, th]) => {
+      const e = exactAt(A, Bv, 1, t);
+      maxGap = Math.max(maxGap, Math.abs(e - th));
+      if (Math.abs(e) > Math.abs(peak)) { peak = e; tPeak = t; }
+      return [Math.log10(t), e];
+    });
+    // Refine the peak on the exact solution: golden section in log t.
+    if (stable && isFinite(tPeak)) {
+      let a = Math.log10(tPeak) - 0.05, b = Math.log10(tPeak) + 0.05;
+      const g = (lt: number) => Math.abs(exactAt(A, Bv, 1, Math.pow(10, lt)));
+      for (let it = 0; it < 40; it++) {
+        const m1 = b - (b - a) / 1.618, m2 = a + (b - a) / 1.618;
+        if (g(m1) > g(m2)) b = m2; else a = m1;
+      }
+      tPeak = Math.pow(10, (a + b) / 2);
+      peak = exactAt(A, Bv, 1, tPeak);
+    }
+    const final = exact.length ? exact[exact.length - 1][1] : NaN;
+    const ys = exact.map(([, y]) => y);
+    const yMin = Math.min(0, ...ys), yMax = Math.max(0, ...ys);
+    const span = (yMax - yMin) || 1;
+    const sv = makeView(stepCanvas, { xMin: Math.log10(t0), xMax: Math.log10(tEnd),
+                                      yMin: yMin - 0.1 * span, yMax: yMax + 0.1 * span, pad: 38 });
+    drawAxes(sv, {
+      xTicks: decades(Math.log10(t0), Math.log10(tEnd)), xTickLabel: decadeLabel,
+      yTicks: [yMin, yMax].filter((v) => Math.abs(v) > 0.05 * span), yTickLabel: (v) => sig(v, 2),
+      xLabel: 't [s]', yLabel: 'θ [rad]', origin: false,
+    });
+    drawPolyline(sv, [[Math.log10(t0), 0], [Math.log10(tEnd), 0]], colors.muted, 1, [4, 4]);
+    drawPolyline(sv, numeric.map(([t, y]) => [Math.log10(t), y]), colors.series[0], 4);
+    drawPolyline(sv, exact, colors.accent, 1.6);
+
+    /* ---------------- readout ---------------- */
+    const asked = [wv, wp, wi];
+    const byMag = [...poles].sort((p1, p2) => cAbs(p2) - cAbs(p1));
+    const worst = Math.max(...byMag.map((p, i) => Math.abs(cAbs(p) - asked[i]) / asked[i]));
+    let verdict: string;
+    if (marginal) {
+      verdict = 'Two poles sit on the imaginary axis: the integrated position loop is as fast as the velocity loop, and the characteristic polynomial J(s³ + ω<sub>v</sub>s² + ω<sub>v</sub>ω<sub>p</sub>s + ω<sub>v</sub>ω<sub>p</sub>ω<sub>ip</sub>) is only stable while ω<sub>v</sub> > ω<sub>ip</sub>. The shaft never stops oscillating.';
+    } else if (ba < 0) {
+      verdict = 'b<sub>a</sub> comes out negative: the bearing drag alone already gives more than this velocity bandwidth, and the rule would have the controller cancel some of it.';
+    } else if (!stable) {
+      verdict = 'A closed-loop pole is in the right half plane. The loops are too close together for the rule to mean anything.';
+    } else if (complex) {
+      verdict = `The bandwidths are too close for the rule: two poles have joined into a complex pair, and the poles are up to ${sig(100 * worst, 2)}% away from the frequencies asked for. The stiffness floor is no longer flat.`;
+    } else if (worst < 0.2) {
+      verdict = `With the loops this far apart each pole lands within ${sig(100 * worst, 2)}% of the bandwidth asked for, and the floor of the stiffness curve is K<sub>sa</sub>.`;
+    } else {
+      verdict = `The poles are real but up to ${sig(100 * worst, 2)}% away from the bandwidths asked for: the asymptotes assume each loop is alone in its decade.`;
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>gains</th><td>b<sub>a</sub> = J<sub>p</sub>·2πf<sub>v</sub> − b<sub>p</sub> = <b>${sig(ba)}</b> N·m·s/rad</td>
+            <td>K<sub>sa</sub> = (b<sub>p</sub> + b<sub>a</sub>)·2πf<sub>p</sub> = <b>${sig(Ks)}</b> N·m/rad</td></tr>
+        <tr><th></th><td>K<sub>isa</sub> = K<sub>sa</sub>·2πf<sub>ip</sub> = <b>${sig(Ki)}</b> N·m/(rad·s)</td><td></td></tr>
+        <tr><th>closed-loop poles</th><td>${byMag.filter((p) => p[1] >= 0).map(hz).join(', ')} Hz</td>
+            <td>asked for −${sig(fv)}, −${sig(fp)}, −${sig(fip)} Hz</td></tr>
+        <tr><th>stiffness floor</th><td>min |T<sub>L</sub>/θ| = ${sig(dsMin)} N·m/rad at ${sig(fMin)} Hz</td>
+            <td>K<sub>sa</sub> = ${sig(Ks)} N·m/rad</td></tr>
+        <tr><th>1 N·m load step</th><td>peak θ = ${sig(peak)} rad at ${sig(tPeak)} s</td>
+            <td>${!stable ? 'does not settle' : capped
+              ? `still ${sig(final)} rad when this window ends at ${sig(tEnd)} s — not settled`
+              : `θ = ${sig(final)} rad at ${sig(tEnd)} s`}</td></tr>
+        <tr><th>exact vs RK4</th>
+            <td colspan="2">${maxGap < 1e-4 * Math.abs(peak)
+              ? `max difference <b>${maxGap.toExponential(1)}</b> rad — the two agree`
+              : `max difference ${maxGap.toExponential(2)} rad`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+  }
+
+  [fvEl, fpEl, fipEl, jEl, bpEl].forEach((el) => el.addEventListener('input', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const [v, p, i] = btn.dataset.f!.split(',').map(Number);
+      fvEl.value = String(Math.log10(v)); fpEl.value = String(Math.log10(p)); fipEl.value = String(Math.log10(i));
+      draw();
+    });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

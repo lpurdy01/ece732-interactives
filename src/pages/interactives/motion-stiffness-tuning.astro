@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/MotionStiffnessTuning.astro';
+---
+
+<BaseLayout title="Tuning Motion Control by Dynamic Stiffness — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Tuning Motion Control by Dynamic Stiffness</h1>
+  <p class="lede">
+    A motor shaft behind an ideal torque loop, with active damping, active
+    stiffness and integrated stiffness. On log-log axes each term of the
+    dynamic stiffness is a straight line, and each loop's bandwidth goes where
+    its line meets the next one up. Pick the three bandwidths, read off the
+    gains, and check where the closed-loop poles actually land.
+  </p>
+  <Widget />
+</BaseLayout>

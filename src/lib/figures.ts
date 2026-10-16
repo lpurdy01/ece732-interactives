@@ -605,6 +605,114 @@ export const inputDecouplingFigures: FigurePair = {
   blockCaption: 'B is the geometry. B̂⁻¹ is the controller undoing it, so that F* reaches only F and T* reaches only T — if the estimate and the two actuators agree.',
 };
 
+/**
+ * The decoupling matrix and the geometry matrix as wiring, for the derivation
+ * walkthrough: one summing junction per matrix row, one gain per entry.
+ *
+ * `shared` false draws B^-1 literally -- four entries, four blocks -- so each
+ * block can be lit from its own cell of the matrix. `shared` true is the usual
+ * drawing, where the two equal gains in a column are computed once and tapped.
+ * Both are the same signal graph; the walkthrough swaps between them to show
+ * that. The bar's own geometry, B, is drawn the same way to the right.
+ *
+ * Keys: m11..m22 are entries of B^-1 and b21, b22 the two arm entries of B.
+ * `h` and `q` name the shared half and 1/L blocks, so hovering a shared block
+ * lights both of the cells it stands for.
+ */
+export function decouplingWiring(shared: boolean): BlockFigure {
+  const half = frac('1', '2'), overL = frac('1', 'L'), arm = frac('L', '2');
+  const gain = { kind: 'gain', w: 60, h: 44 };
+
+  const controller = shared
+    ? {
+        elements: [
+          { ...gain, x: 150, y: 70, label: half, sym: 'h m11 m21', tone: 'active' },
+          { ...gain, x: 150, y: 260, label: overL, sym: 'q m12 m22 L', tone: 'active' },
+        ],
+        wires: [
+          { pts: [[20, 70], [120, 70]], tone: 'active' },
+          { pts: [[20, 260], [120, 260]], tone: 'active' },
+          { pts: [[180, 70], [287, 70]], sign: '+', tone: 'active' },
+          { pts: [[225, 70], [225, 200], [300, 200], [300, 247]], tap: true, sign: '+', tone: 'active' },
+          { pts: [[180, 260], [287, 260]], sign: '-', tone: 'active' },
+          { pts: [[250, 260], [250, 130], [300, 130], [300, 83]], tap: true, sign: '+', tone: 'active' },
+        ],
+        labels: [
+          { sym: 'w11', tag: 'h', value: true, x: 203, y: 44 },
+          { sym: 'w12', tag: 'q', value: true, x: 215, y: 282 },
+        ],
+      }
+    : {
+        elements: [
+          { ...gain, x: 150, y: 70, label: half, sym: 'm11', tone: 'active' },
+          { ...gain, x: 150, y: 130, label: overL, sym: 'm12 L', tone: 'active' },
+          { ...gain, x: 150, y: 200, label: half, sym: 'm21', tone: 'active' },
+          { ...gain, x: 150, y: 260, label: overL, sym: 'm22 L', tone: 'active' },
+        ],
+        wires: [
+          { pts: [[20, 70], [120, 70]], tone: 'active' },
+          { pts: [[70, 70], [70, 200], [120, 200]], tap: true, tone: 'active' },
+          { pts: [[20, 260], [120, 260]], tone: 'active' },
+          { pts: [[95, 260], [95, 130], [120, 130]], tap: true, tone: 'active' },
+          { pts: [[180, 70], [287, 70]], sign: '+', tone: 'active' },
+          { pts: [[180, 130], [300, 130], [300, 83]], sign: '+', tone: 'active' },
+          { pts: [[180, 200], [300, 200], [300, 247]], sign: '+', tone: 'active' },
+          { pts: [[180, 260], [287, 260]], sign: '-', tone: 'active' },
+        ],
+        labels: [
+          { sym: 'w11', tag: 'm11', value: true, x: 236, y: 44 },
+          { sym: 'w12', tag: 'm12', value: true, x: 236, y: 104 },
+          { sym: 'w21', tag: 'm21', value: true, x: 236, y: 174 },
+          { sym: 'w22', tag: 'm22', value: true, x: 236, y: 282 },
+        ],
+      };
+
+  return {
+    title: shared
+      ? 'The decoupling matrix with its equal gains shared, feeding the geometry of the bar'
+      : 'The decoupling matrix drawn one block per entry, feeding the geometry of the bar',
+    viewBox: [0, 0, 760, 330],
+    symbols: {
+      Fc: { svg: 'F^{*}' }, Tc: { svg: 'T^{*}' }, F1: { svg: 'F_{1}' }, F2: { svg: 'F_{2}' },
+      w11: { svg: '½F^{*}' }, w21: { svg: '½F^{*}' }, w12: { svg: 'T^{*}/L' }, w22: { svg: 'T^{*}/L' },
+      wb21: { svg: '(L/2)F_{1}' }, wb22: { svg: '(L/2)F_{2}' },
+    },
+    elements: [
+      ...controller.elements,
+      { kind: 'sum', x: 300, y: 70, tone: 'active' },
+      { kind: 'sum', x: 300, y: 260, tone: 'active' },
+      { ...gain, x: 505, y: 140, label: arm, sym: 'b21 L', tone: 'physical' },
+      { ...gain, x: 505, y: 260, label: arm, sym: 'b22 L', tone: 'physical' },
+      { kind: 'sum', x: 600, y: 70, tone: 'physical' },
+      { kind: 'sum', x: 665, y: 260, tone: 'physical' },
+    ],
+    wires: [
+      ...controller.wires,
+      { pts: [[313, 70], [587, 70]], sign: '+', tone: 'physical' },
+      { pts: [[420, 70], [420, 140], [475, 140]], tap: true, tone: 'physical' },
+      { pts: [[535, 140], [665, 140], [665, 247]], sign: '+', tone: 'physical' },
+      { pts: [[313, 260], [475, 260]], tone: 'physical' },
+      { pts: [[440, 260], [440, 200], [600, 200], [600, 83]], tap: true, sign: '+', tone: 'physical' },
+      { pts: [[535, 260], [652, 260]], sign: '-', tone: 'physical' },
+      { pts: [[613, 70], [745, 70]], tone: 'physical' },
+      { pts: [[678, 260], [745, 260]], tone: 'physical' },
+    ],
+    labels: [
+      { sym: 'Fc', value: true, x: 22, y: 44, anchor: 'start' },
+      { sym: 'Tc', value: true, x: 22, y: 282, anchor: 'start' },
+      ...controller.labels,
+      { sym: 'F1', value: true, x: 365, y: 44 },
+      { sym: 'F2', value: true, x: 365, y: 282 },
+      { sym: 'wb21', tag: 'b21', value: true, x: 712, y: 150 },
+      { sym: 'wb22', tag: 'b22', value: true, x: 592, y: 282 },
+      { sym: 'F', value: true, x: 705, y: 44 },
+      { sym: 'T', value: true, x: 715, y: 282 },
+      { sym: 'controller: B^{−1}', x: 160, y: 322 },
+      { sym: 'the bar: B', x: 545, y: 322 },
+    ],
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /* W5L2 -- disturbance input and nonlinear state feedback decoupling   */
 /* ------------------------------------------------------------------ */
@@ -787,4 +895,293 @@ export const piRegulatorFigures: FigurePair = {
   block: picBlock,
   physicalCaption: 'With the shaft held, speed is zero and the mechanical half of the motor drops out of the current loop.',
   blockCaption: 'The controller has a zero at −1/τc and the winding has a pole at −1/τe. Whether they sit on top of each other is the whole tuning question.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W7L1 -- state feedback motion control on a motor shaft              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A shaft behind an ideal torque modulator, with the three state feedback
+ * gains in the controller. The command tool adds the command inputs; the
+ * tuning tool holds them at zero, because dynamic stiffness is measured
+ * with nothing commanded.
+ */
+function motionSchematic(command: boolean): Schematic {
+  return {
+    title: command
+      ? 'Motor shaft behind a torque modulator, following a position and velocity command'
+      : 'Motor shaft behind a torque modulator, holding position against a load torque',
+    viewBox: [0, 0, 640, 290],
+    boxes: [{ x: 18, y: 46, w: 238, h: 190, label: 'controller' }],
+    wires: [
+      { pts: [[372, 140], [604, 140]] },
+      { pts: [[530, 140], [530, 152]] },
+    ],
+    parts: [
+      { kind: 'disc', x: 440, y: 140, w: 30, label: 'J_{p}', sym: 'J', value: true },
+      { kind: 'damper', x: 530, y: 180, dir: 'v', len: 56, label: 'b_{p}', sym: 'bp', value: true, side: 1 },
+    ],
+    markers: [
+      { kind: 'couple', x: 312, y: 140, dir: 'h', len: 104, flow: 1, label: 'T_{em} = T^{*}_{em}' },
+      { kind: 'torque', x: 440, y: 140, len: 42, flow: 1, label: 'ω, θ', side: -1 },
+      { kind: 'torque', x: 590, y: 140, len: 22, flow: -1, label: 'T_{L}', sym: 'TL', side: -1 },
+      { kind: 'hatch', x: 530, y: 208, dir: 'h', len: 56, side: 1 },
+    ],
+    labels: [
+      { x: 30, y: 92, text: 'b_{a}(ω^{*} − ω)', sym: 'fv', anchor: 'start' },
+      { x: 30, y: 134, text: '+ K_{sa}(θ^{*} − θ)', sym: 'fp', anchor: 'start' },
+      { x: 30, y: 176, text: '+ K_{isa}∫(θ^{*} − θ)dt', sym: 'fip', anchor: 'start' },
+      { x: 137, y: 222, text: 'measures θ and ω', small: true },
+      command
+        ? { x: 137, y: 30, text: 'θ^{*} = A sin 2πf_{c}t,  ω^{*} = dθ^{*}/dt', sym: 'fc' }
+        : { x: 137, y: 30, text: 'commands held at zero', small: true },
+      { x: 634, y: 280, text: command ? 'θ follows θ^{*}' : 'T_{L} is the disturbance, θ the response', anchor: 'end', small: true },
+    ],
+  };
+}
+
+const motionTuneBlock: BlockFigure = {
+  title: 'Torque modulator, shaft, and the three state feedback gains',
+  viewBox: [0, 0, 690, 356],
+  elements: [
+    { kind: 'sum', x: 40, y: 70, tone: 'active' },
+    { kind: 'sum', x: 95, y: 70, tone: 'active' },
+    { kind: 'sum', x: 150, y: 70, tone: 'active' },
+    { kind: 'gain', x: 205, y: 70, w: 40, label: '≈1' },
+    { kind: 'sum', x: 265, y: 70 },
+    { kind: 'fn', x: 335, y: 70, w: 46, label: frac('1', 'J_{p}'), sym: 'J' },
+    { kind: 'fn', x: 410, y: 70, w: 46, label: frac('1', 's') },
+    { kind: 'fn', x: 500, y: 70, w: 46, label: frac('1', 's') },
+    { kind: 'fn', x: 590, y: 70, w: 46, label: frac('1', 's'), tone: 'active' },
+    { kind: 'gain', x: 335, y: 132, w: 54, label: 'b_{p}', sym: 'bp', value: true },
+    { kind: 'gain', x: 335, y: 194, w: 60, label: 'b_{a}', sym: 'fv', value: true, tone: 'active' },
+    { kind: 'gain', x: 335, y: 256, w: 60, label: 'K_{sa}', sym: 'fp', value: true, tone: 'active' },
+    { kind: 'gain', x: 335, y: 318, w: 64, label: 'K_{isa}', sym: 'fip', value: true, tone: 'active' },
+  ],
+  wires: [
+    { pts: [[8, 70], [27, 70]] },
+    { pts: [[53, 70], [82, 70]] },
+    { pts: [[108, 70], [137, 70]] },
+    { pts: [[163, 70], [185, 70]] },
+    { pts: [[225, 70], [252, 70]], sign: '+' },
+    { pts: [[265, 18], [265, 57]], sign: '-' },
+    { pts: [[278, 70], [312, 70]] },
+    { pts: [[358, 70], [387, 70]] },
+    { pts: [[433, 70], [477, 70]] },
+    { pts: [[523, 70], [567, 70]] },
+    { pts: [[613, 70], [682, 70]] },
+    { pts: [[445, 70], [445, 132], [362, 132]], tap: true },
+    { pts: [[308, 132], [265, 132], [265, 83]], sign: '-' },
+    { pts: [[460, 70], [460, 194], [365, 194]], tap: true, tone: 'active' },
+    { pts: [[305, 194], [150, 194], [150, 83]], sign: '-', tone: 'active' },
+    { pts: [[545, 70], [545, 256], [365, 256]], tap: true, tone: 'active' },
+    { pts: [[305, 256], [95, 256], [95, 83]], sign: '-', tone: 'active' },
+    { pts: [[640, 70], [640, 318], [367, 318]], tap: true, tone: 'active' },
+    { pts: [[303, 318], [40, 318], [40, 83]], sign: '-', tone: 'active' },
+  ],
+  labels: [
+    { sym: '0', x: 12, y: 60, anchor: 'start' },
+    { sym: 'T_{em}', x: 238, y: 60 },
+    { sym: 'T_{L}', tag: 'TL', x: 275, y: 24, anchor: 'start' },
+    { sym: 'ω', x: 452, y: 60 },
+    { sym: 'θ', x: 541, y: 60 },
+    { sym: '∫θdt', x: 662, y: 60 },
+  ],
+};
+
+export const motionTuneFigures: FigurePair = {
+  physical: motionSchematic(false),
+  block: motionTuneBlock,
+  physicalCaption: 'Inside the torque loop’s bandwidth the modulator is a wire, and what is left is an inertia, a bearing drag, and whatever the controller adds.',
+  blockCaption: 'Each gain wraps one more integrator than the last: b_a around one, K_sa around two, K_isa around three. Each takes over the stiffness one decade further down.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W7L1 + W7L2 -- motion commands: state feedback and classical        */
+/* ------------------------------------------------------------------ */
+
+const sfbCommandBlock: BlockFigure = {
+  title: 'State feedback motion controller with position and velocity commands',
+  viewBox: [0, 0, 700, 236],
+  elements: [
+    { kind: 'sum', x: 90, y: 46, tone: 'active' },
+    { kind: 'gain', x: 190, y: 46, w: 60, label: 'K_{sa}', sym: 'fp', value: true, tone: 'active' },
+    { kind: 'fn', x: 160, y: 110, w: 40, label: frac('1', 's'), tone: 'active' },
+    { kind: 'gain', x: 235, y: 110, w: 60, label: 'K_{isa}', sym: 'fip', value: true, tone: 'active' },
+    { kind: 'sum', x: 110, y: 165, tone: 'active' },
+    { kind: 'gain', x: 190, y: 165, w: 60, label: 'b_{a}', sym: 'fv', value: true, tone: 'active' },
+    { kind: 'sum', x: 300, y: 110, tone: 'active' },
+    { kind: 'gain', x: 360, y: 110, w: 40, label: '≈1' },
+    { kind: 'sum', x: 430, y: 110 },
+    { kind: 'fn', x: 500, y: 110, w: 46, label: frac('1', 'J_{p}') },
+    { kind: 'fn', x: 570, y: 110, w: 40, label: frac('1', 's') },
+    { kind: 'fn', x: 645, y: 110, w: 40, label: frac('1', 's') },
+    { kind: 'gain', x: 500, y: 172, w: 50, label: 'b_{p}' },
+  ],
+  wires: [
+    { pts: [[10, 46], [77, 46]], sign: '+' },
+    { pts: [[103, 46], [160, 46]] },
+    { pts: [[120, 46], [120, 110], [140, 110]], tap: true },
+    { pts: [[180, 110], [205, 110]] },
+    { pts: [[220, 46], [300, 46], [300, 97]], sign: '+' },
+    { pts: [[265, 110], [287, 110]], sign: '+' },
+    { pts: [[10, 165], [97, 165]], sign: '+' },
+    { pts: [[123, 165], [160, 165]] },
+    { pts: [[220, 165], [300, 165], [300, 123]], sign: '+' },
+    { pts: [[313, 110], [340, 110]] },
+    { pts: [[380, 110], [417, 110]], sign: '+' },
+    { pts: [[430, 30], [430, 97]], sign: '-' },
+    { pts: [[443, 110], [477, 110]] },
+    { pts: [[523, 110], [550, 110]] },
+    { pts: [[590, 110], [625, 110]] },
+    { pts: [[665, 110], [695, 110]] },
+    { pts: [[600, 110], [600, 172], [525, 172]], tap: true },
+    { pts: [[475, 172], [430, 172], [430, 123]], sign: '-' },
+    { pts: [[612, 110], [612, 222], [110, 222], [110, 178]], tap: true, sign: '-', tone: 'active' },
+    { pts: [[680, 110], [680, 10], [90, 10], [90, 33]], tap: true, sign: '-', tone: 'active' },
+  ],
+  labels: [
+    { sym: 'θ^{*}', tag: 'fc', x: 14, y: 36, anchor: 'start' },
+    { sym: 'ω^{*}', tag: 'wstar', x: 14, y: 155, anchor: 'start' },
+    { sym: 'T^{*}_{em}', x: 327, y: 100 },
+    { sym: 'T_{L}', x: 440, y: 36, anchor: 'start' },
+    { sym: 'ω', x: 607, y: 100 },
+    { sym: 'θ', x: 690, y: 100 },
+  ],
+};
+
+const classicalCommandBlock: BlockFigure = {
+  title: 'Classical cascade: P position loop around a PI velocity loop',
+  viewBox: [0, 0, 700, 236],
+  elements: [
+    { kind: 'sum', x: 70, y: 110, tone: 'active' },
+    { kind: 'gain', x: 130, y: 110, w: 54, label: 'K_{pp}', sym: 'kpp fp', value: true, tone: 'active' },
+    { kind: 'sum', x: 190, y: 110, tone: 'active' },
+    { kind: 'fn', x: 110, y: 172, w: 40, label: 's', sym: 'ff' },
+    { kind: 'sum', x: 245, y: 110, tone: 'active' },
+    { kind: 'fn', x: 325, y: 110, w: 96, h: 46, label: frac('K_{pv}s + K_{iv}', 's'), sym: 'kpi fv fip', value: true, tone: 'active' },
+    { kind: 'gain', x: 405, y: 110, w: 40, label: '≈1' },
+    { kind: 'sum', x: 460, y: 110 },
+    { kind: 'fn', x: 520, y: 110, w: 46, label: frac('1', 'J_{p}') },
+    { kind: 'fn', x: 580, y: 110, w: 40, label: frac('1', 's') },
+    { kind: 'fn', x: 650, y: 110, w: 40, label: frac('1', 's') },
+    { kind: 'gain', x: 520, y: 172, w: 50, label: 'b_{p}' },
+  ],
+  wires: [
+    { pts: [[10, 110], [57, 110]], sign: '+' },
+    { pts: [[83, 110], [103, 110]] },
+    { pts: [[157, 110], [177, 110]], sign: '+' },
+    { pts: [[30, 110], [30, 172], [90, 172]], tap: true },
+    { pts: [[130, 172], [190, 172], [190, 123]], sign: '+' },
+    { pts: [[203, 110], [232, 110]], sign: '+' },
+    { pts: [[258, 110], [277, 110]] },
+    { pts: [[373, 110], [385, 110]] },
+    { pts: [[425, 110], [447, 110]], sign: '+' },
+    { pts: [[460, 30], [460, 97]], sign: '-' },
+    { pts: [[473, 110], [497, 110]] },
+    { pts: [[543, 110], [560, 110]] },
+    { pts: [[600, 110], [630, 110]] },
+    { pts: [[670, 110], [695, 110]] },
+    { pts: [[608, 110], [608, 172], [545, 172]], tap: true },
+    { pts: [[495, 172], [460, 172], [460, 123]], sign: '-' },
+    { pts: [[620, 110], [620, 222], [245, 222], [245, 123]], tap: true, sign: '-', tone: 'active' },
+    { pts: [[684, 110], [684, 12], [70, 12], [70, 97]], tap: true, sign: '-', tone: 'active' },
+  ],
+  labels: [
+    { sym: 'θ^{*}', tag: 'fc', x: 14, y: 100, anchor: 'start' },
+    { sym: 'ω^{*}_{FF}', tag: 'ff', x: 150, y: 200 },
+    { sym: 'ω^{*}', x: 218, y: 100 },
+    { sym: 'T_{L}', x: 470, y: 36, anchor: 'start' },
+    { sym: 'ω', x: 627, y: 100 },
+    { sym: 'θ', x: 692, y: 100 },
+  ],
+};
+
+export const sfbCommandFigures: FigurePair = {
+  physical: motionSchematic(true),
+  block: sfbCommandBlock,
+  physicalCaption: 'The same shaft and the same three gains, now with commands: the references stop being zero.',
+  blockCaption: 'Each gain compares a state with its own command. Leave ω* off and b_a sees −ω alone: the feedback is unchanged, the command is not.',
+};
+
+export const classicalCommandFigures: FigurePair = {
+  physical: motionSchematic(true),
+  block: classicalCommandBlock,
+  physicalCaption: 'The same shaft. Only the controller’s wiring is different.',
+  blockCaption: 'The position loop’s output is the velocity loop’s command. The s block is the velocity feedforward; without it the PI integrates ω* from the position error only.',
+};
+
+/* ------------------------------------------------------------------ */
+/* W7L2 -- resonant load: two inertias on a compliant shaft            */
+/* ------------------------------------------------------------------ */
+
+const resonantPhysical: Schematic = {
+  title: 'Motor and load inertias joined by a compliant shaft',
+  viewBox: [0, 0, 660, 300],
+  boxes: [{ x: 120, y: 18, w: 260, h: 84, label: 'controller' }],
+  wires: [
+    { pts: [[280, 200], [330, 200]] }, { pts: [[450, 200], [500, 200]] },
+    { pts: [[560, 200], [624, 200]] },
+    { pts: [[310, 200], [310, 252], [330, 252]] }, { pts: [[450, 252], [470, 252], [470, 200]] },
+  ],
+  parts: [
+    { kind: 'disc', x: 250, y: 200, w: 30, label: 'J_{m}', sym: 'Jm', value: true },
+    { kind: 'spring', x: 390, y: 200, len: 120, label: 'K_{r}', sym: 'Kr', value: true, side: -1 },
+    { kind: 'damper', x: 390, y: 252, len: 120, label: 'b_{r}', sym: 'br', value: true, side: 1 },
+    { kind: 'disc', x: 530, y: 200, w: 30, label: 'J_{L}', sym: 'JL', value: true },
+  ],
+  markers: [
+    { kind: 'couple', x: 250, y: 132, dir: 'v', len: 40, flow: 1, label: 'T_{m}', side: -1 },
+    { kind: 'torque', x: 610, y: 200, len: 22, flow: -1, label: 'T_{L}', sym: 'TL', side: -1 },
+  ],
+  labels: [
+    { x: 250, y: 62, text: 'T_{m} = −K̂_{r}θ_{L}', sym: 'Khat' },
+    { x: 250, y: 88, text: 'measures θ_{L}', small: true },
+    { x: 212, y: 170, text: 'θ_{m}', anchor: 'end' },
+    { x: 530, y: 160, text: 'θ_{L}' },
+    { x: 654, y: 292, text: 'a gearbox reflected to the motor side looks the same', anchor: 'end', small: true },
+  ],
+};
+
+const resonantBlock: BlockFigure = {
+  title: 'Two inertias coupled by the shaft torque, with the load decoupled into the motor',
+  viewBox: [0, 0, 640, 318],
+  elements: [
+    { kind: 'sum', x: 90, y: 60 },
+    { kind: 'fn', x: 210, y: 60, w: 64, h: 44, label: frac('1', 'J_{m}s^{2}'), sym: 'Jm' },
+    { kind: 'sum', x: 90, y: 200 },
+    { kind: 'fn', x: 210, y: 200, w: 64, h: 44, label: frac('1', 'J_{L}s^{2}'), sym: 'JL' },
+    { kind: 'sum', x: 470, y: 130 },
+    { kind: 'gain', x: 330, y: 130, w: 92, label: 'K_{r} + b_{r}s', sym: 'Kr br' },
+    { kind: 'gain', x: 330, y: 270, w: 54, label: 'K̂_{r}', sym: 'Khat', value: true, tone: 'active' },
+  ],
+  wires: [
+    { pts: [[103, 60], [178, 60]] },
+    { pts: [[242, 60], [620, 60]] },
+    { pts: [[103, 200], [178, 200]] },
+    { pts: [[242, 200], [620, 200]] },
+    { pts: [[470, 60], [470, 117]], tap: true, sign: '-' },
+    { pts: [[470, 200], [470, 143]], tap: true, sign: '+' },
+    { pts: [[457, 130], [376, 130]] },
+    { pts: [[284, 130], [90, 130], [90, 73]], sign: '+' },
+    { pts: [[90, 130], [90, 187]], tap: true, sign: '-' },
+    { pts: [[90, 248], [90, 213]], sign: '-' },
+    { pts: [[560, 200], [560, 270], [357, 270]], tap: true, tone: 'active' },
+    { pts: [[303, 270], [30, 270], [30, 60], [77, 60]], sign: '-', tone: 'active' },
+  ],
+  labels: [
+    { sym: 'θ_{m}', x: 610, y: 50 },
+    { sym: 'θ_{L}', x: 610, y: 190 },
+    { sym: 'θ_{L} − θ_{m}', x: 418, y: 122 },
+    { sym: 'T_{shaft}', x: 200, y: 122 },
+    { sym: 'T_{L}', tag: 'TL', x: 100, y: 246, anchor: 'start' },
+  ],
+};
+
+export const resonantLoadFigures: FigurePair = {
+  physical: resonantPhysical,
+  block: resonantBlock,
+  physicalCaption: 'The shaft is a spring. Stiff for precision, lightly damped because damping costs power.',
+  blockCaption: 'One shaft torque pushes both inertias, in opposite directions. K̂_r feeds the load’s position into the motor to cancel what the shaft does to it.',
 };

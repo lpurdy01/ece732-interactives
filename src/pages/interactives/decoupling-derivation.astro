@@ -1,0 +1,22 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/DecouplingDerivation.astro';
+---
+
+<BaseLayout title="Deriving the Decoupling Matrix — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Deriving the Decoupling Matrix</h1>
+  <p class="lede">
+    Two actuators, two things you want from them, and a matrix in the controller
+    that sorts out which actuator does how much. This page builds that matrix
+    from nothing, one step at a time: where each entry comes from, how the
+    matrix is turned around, and how it ends up as blocks and summing junctions.
+  </p>
+  <p class="hint">
+    Five steps. Each one has something to move or fill in, and the numbers in
+    every step follow the same sliders. An entry with a dotted underline lights
+    up wherever else it appears when you hover it.
+  </p>
+  <Widget />
+</BaseLayout>

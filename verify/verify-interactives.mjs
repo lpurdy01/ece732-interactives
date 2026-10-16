@@ -563,6 +563,11 @@ async function checkResponsiveAndThemes(browser, origin, report) {
     '/interactives/eigenvalue-migration/',
     '/interactives/motor-transfer-matrix/',
     '/interactives/motor-state-feedback/',
+    '/interactives/decoupling-derivation/',
+    '/interactives/motion-stiffness-tuning/',
+    '/interactives/motion-command-paths/',
+    '/interactives/resonant-load/',
+    '/interactives/stiffness-bandwidth/',
   ];
 
   // Phone width: nothing may scroll sideways.
@@ -964,6 +969,222 @@ async function checkMotorStateFeedback(page, origin, report) {
 /* Weeks 5 and 6: decoupling, virtual zero references, current loops.  */
 /* Expected values are again computed here, not read back.             */
 
+/**
+ * The derivation walkthrough. Its numbers are plain text for exactly this
+ * purpose: every value asserted below is recomputed here by a route the page
+ * does not use (Cramer's rule for the solve, a written-out product for the
+ * multiply-back), from slider values chosen here rather than the defaults.
+ */
+async function checkDecouplingDerivation(page, origin, report) {
+  const errors = watchErrors(page);
+  const url = `${origin}/interactives/decoupling-derivation/`;
+  await page.goto(url, { waitUntil: 'networkidle' });
+
+  const f3 = (x) => { const r = Math.round(x * 1000) / 1000; return r === 0 ? '0' : String(r).replace('-', '−'); };
+  const text = async (sel) => (await page.locator(sel).innerText()).replace(/\s+/g, ' ');
+  const steps = () => page.locator('.dv-step:visible').count();
+  const slot = (scope, key) => page.locator(`${scope} [data-val="${key}"]`).first().textContent();
+  const next = async () => { await page.click('#dv-next'); await page.waitForTimeout(60); };
+
+  report.check('derivation: opens on step 1 alone', await steps() === 1, `${await steps()} step(s) visible`);
+
+  /* step 1: what the bar gets from two chosen forces */
+  const L = 2.6, F1 = -3.4, F2 = 7.1, a = L / 2;
+  await setRange(page, '#dv-l', L);
+  await setRange(page, '#dv-f1', F1);
+  await setRange(page, '#dv-f2', F2);
+  const F = F1 + F2, T = a * F1 - a * F2;
+  let t = await text('#dv-r1');
+  report.check('derivation: net force and torque match F1 + F2 and (L/2)(F1 − F2)',
+               t.includes(`= ${f3(F)} N`) && t.includes(`= ${f3(T)} N·m`), `expect ${f3(F)} N, ${f3(T)} N·m | ${t}`);
+  report.check('derivation: the bar prints the same two numbers as the readout',
+               await slot('#dv-bar1', 'F') === `${f3(F)} N` && await slot('#dv-bar1', 'T') === `${f3(T)} N·m`,
+               `${await slot('#dv-bar1', 'F')}, ${await slot('#dv-bar1', 'T')}`);
+  // A negative force has to be drawn pointing down and a positive one up, or
+  // the picture contradicts the sign convention printed in its corner.
+  const tipBelowTail = async (key) => {
+    const pts = (await page.locator(`#dv-bar1 [data-k="${key}"]`).getAttribute('points')).split(' ')
+      .map((q) => parseFloat(q.split(',')[1]));
+    return pts[1] > pts[0];
+  };
+  report.check('derivation: a negative force points down and a positive one up',
+               await tipBelowTail('f1') === true && await tipBelowTail('f2') === false);
+
+  // The hand challenge: F = 6 N, T = 3 N·m means F1 = 3 + 3/L, F2 = 3 − 3/L.
+  for (const len of [2, 3.3]) {
+    await setRange(page, '#dv-l', len);
+    await setRange(page, '#dv-f1', (3 + 3 / len).toFixed(1));
+    await setRange(page, '#dv-f2', (3 - 3 / len).toFixed(1));
+    t = await text('#dv-ch');
+    report.check(`derivation: the hand challenge is solvable and recognised at L = ${len} m`, /Got it/.test(t), t.slice(0, 80));
+  }
+  await setRange(page, '#dv-f1', 1);
+  t = await text('#dv-ch');
+  report.check('derivation: off target, the challenge says which way', /too low/.test(t) && !/Got it/.test(t), t);
+  await shoot(page, 'derivation-step1');
+
+  /* step 2: the fill-in diagnoses the slip rather than just refusing it */
+  await setRange(page, '#dv-l', L);
+  await setRange(page, '#dv-f1', F1);
+  await setRange(page, '#dv-f2', F2);
+  await next();
+  const fill = async (b11, b12, b21, b22) => {
+    for (const [cell, v] of [['b11', b11], ['b12', b12], ['b21', b21], ['b22', b22]]) {
+      await page.selectOption(`.dv-fill select[data-cell="${cell}"]`, v);
+    }
+    await page.click('#dv-check');
+    return text('#dv-fb');
+  };
+  t = await fill('1', '1', 'L/2', 'L/2');
+  report.check('derivation: a missing minus sign in B is named as a sign slip',
+               /wrong sign/.test(t) && await page.locator('#dv-after2').isHidden(), t);
+  t = await fill('1', 'L/2', '1', '-L/2');
+  report.check('derivation: a transposed B is named as rows and columns swapped', /rows and columns swapped/.test(t), t);
+  t = await fill('1', '1', '1/L', '-L/2');
+  report.check('derivation: 1/L in B is pointed at step 3', /step 3/.test(t), t);
+  t = await fill('1', '1', 'L/2', '-L/2');
+  report.check('derivation: the right four entries are accepted and B is shown',
+               /Correct/.test(t) && await page.locator('#dv-after2').isVisible(), t);
+  t = await text('#dv-n2');
+  report.check('derivation: B with numbers in it reproduces F and T',
+               [F, T, a, -a, F1, F2].every((v) => t.includes(f3(v))), t);
+
+  /* step 3: solve for the actuator forces; expected by Cramer's rule */
+  await next();
+  const Fc = -5, Tc = 7.5;
+  await setRange(page, '#dv-fc', Fc);
+  await setRange(page, '#dv-tc', Tc);
+  const det = 1 * -a - 1 * a;
+  const F1c = (Fc * -a - 1 * Tc) / det, F2c = (1 * Tc - a * Fc) / det;
+  report.check('derivation: step 3 starts with the two equations only',
+               await page.locator('#dv-l3 > li:visible').count() === 2 && await page.locator('#dv-after3').isHidden());
+  for (let i = 0; i < 4; i++) await page.click('#dv-more3 button');
+  report.check('derivation: four clicks reveal the rest of the elimination',
+               await page.locator('#dv-l3 > li:visible').count() === 6 && await page.locator('#dv-more3').isHidden()
+               && await page.locator('#dv-after3').isVisible());
+  t = await text('#dv-l3');
+  report.check('derivation: the eliminated F1 and F2 match Cramer\'s rule',
+               t.includes(`F₁ = ${f3(F1c)} N`) && t.includes(`F₂ = ${f3(F2c)} N`),
+               `expect ${f3(F1c)}, ${f3(F2c)} | ${t.slice(-260)}`);
+  t = await text('#dv-r3');
+  report.check('derivation: putting them back returns the commands, and the two routes agree',
+               t.includes(`= ${f3(Fc)} N`) && t.includes(`= ${f3(Tc)} N·m`) && /the two agree/.test(t), t);
+  report.check('derivation: the step 3 bar carries the solved forces',
+               await slot('#dv-bar2', 'F1') === `${f3(F1c)} N` && await slot('#dv-bar2', 'F2') === `${f3(F2c)} N`
+               && await slot('#dv-bar2', 'T') === `${f3(Tc)} N·m`);
+
+  /* step 4: the recipe, then B times each candidate */
+  await next();
+  for (let i = 0; i < 3; i++) await page.click('#dv-more4 button');
+  t = await text('#dv-l4 [data-n="2"]');
+  report.check('derivation: the determinant is −L', t.trim().endsWith(`= ${f3(-L)}`), t);
+  const product = async () => (await page.locator('#dv-prod .dv-mat').nth(2).locator('span').allInnerTexts()).map((s) => s.trim());
+  const B = [[1, 1], [a, -a]];
+  const times = (C) => [0, 1].flatMap((r) => [0, 1].map((c) => f3(B[r][0] * C[0][c] + B[r][1] * C[1][c])));
+  const cases = [
+    ['inv', [[0.5, 1 / L], [0.5, -1 / L]], /Identity/],
+    ['arm', [[0.5, a], [0.5, -a]], /Diagonal, but not identity/],
+    ['sign', [[0.5, 1 / L], [0.5, 1 / L]], /Not diagonal/],
+    ['none', [[1, 0], [0, 1]], /just B again/],
+  ];
+  for (const [name, C, verdict] of cases) {
+    await page.check(`input[name="dv-cand"][value="${name}"]`);
+    const got = await product(), want = times(C);
+    t = await text('#dv-verdict');
+    report.check(`derivation: B × candidate "${name}" is the product computed here, with the right verdict`,
+                 got.join(',') === want.join(',') && verdict.test(t), `got ${got} want ${want} | ${t.slice(0, 70)}`);
+  }
+  await page.check('input[name="dv-cand"][value="arm"]');
+  t = await text('#dv-verdict');
+  report.check('derivation: L/2 for 1/L is reported as a torque gain of L²/2', t.includes(`multiplied by ${f3(L * L / 2)}`), t);
+  await page.check('input[name="dv-cand"][value="inv"]');
+  report.check('derivation: the recipe agrees with elimination on the numbers', /the two agree/.test(await text('#dv-r4')));
+  await setRange(page, '#dv-l2', 1.4);
+  report.check('derivation: the second L slider is the same L',
+               await page.inputValue('#dv-l') === '1.4' && await slot('#dv-bar1', 'L') === 'L = 1.40 m');
+  await setRange(page, '#dv-l2', L);
+
+  /* step 5: the same numbers on the wires */
+  await next();
+  report.check('derivation: the fifth step is the last', await steps() === 5 && /all 5 steps/.test(await text('#dv-where'))
+               && await page.locator('#dv-next').isDisabled());
+  const wires = async (scope) => Promise.all(['Fc', 'Tc', 'w12', 'F1', 'F2', 'wb21', 'F', 'T'].map((key) => slot(scope, key)));
+  const expectWires = (fc, tc) => {
+    const f1 = fc / 2 + tc / L, f2 = fc / 2 - tc / L;
+    return [`${f3(fc)} N`, `${f3(tc)} N·m`, `${f3(tc / L)} N`, `${f3(f1)} N`, `${f3(f2)} N`,
+            `${f3(a * f1)} N·m`, `${f3(f1 + f2)} N`, `${f3(a * f1 - a * f2)} N·m`];
+  };
+  report.check('derivation: every wire of the diagram carries the value computed here',
+               (await wires('#dv-fig-full')).join('|') === expectWires(Fc, Tc).join('|'),
+               `${await wires('#dv-fig-full')} vs ${expectWires(Fc, Tc)}`);
+
+  await page.click('#dv-null button:nth-child(1)');
+  t = await text('#dv-null5');
+  report.check('derivation: a force command alone leaves the torque at zero',
+               /force command alone/.test(t) && await slot('#dv-fig-full', 'T') === '0 N·m'
+               && await slot('#dv-fig-full', 'F1') === await slot('#dv-fig-full', 'F2'), t);
+  await page.click('#dv-null button:nth-child(2)');
+  t = await text('#dv-null5');
+  report.check('derivation: a torque command alone leaves the force at zero',
+               /torque command alone/.test(t) && await slot('#dv-fig-full', 'F') === '0 N'
+               && await page.inputValue('#dv-fc') === '0', t);
+
+  await page.click('#dv-null button:nth-child(3)');
+  await page.check('#dv-shared');
+  report.check('derivation: sharing the equal gains swaps the drawing and not the numbers',
+               await page.locator('#dv-fig-full').isHidden() && await page.locator('#dv-fig-shared').isVisible()
+               && (await wires('#dv-fig-shared')).join('|') === expectWires(8, 4).join('|'));
+  await page.locator('#step-5 .katex [data-sym^="m21"]').hover();
+  const sharedLit = await page.locator('#dv-fig-shared .dd-el.is-hot').count();
+  await page.locator('#dv-fig-shared .dd-el[data-sym^="h "]').hover();
+  const bothCells = await page.locator('#step-5 .katex [data-sym^="m11"].is-hot').count()
+    + await page.locator('#step-5 .katex [data-sym^="m21"].is-hot').count();
+  report.check('derivation: an entry lights its shared block, and the shared block lights both its entries',
+               sharedLit >= 1 && bothCells === 2, `block ${sharedLit}, cells ${bothCells}`);
+  await page.uncheck('#dv-shared');
+  await page.locator('#step-5 .katex [data-sym^="m22"]').hover();
+  const oneBlock = await page.locator('#dv-fig-full rect.dd-block').evaluateAll((els) =>
+    els.filter((el) => el.closest('.is-hot')).length);
+  report.check('derivation: with one block per entry, an entry lights exactly its own block', oneBlock === 1, `${oneBlock} lit`);
+  await page.mouse.move(0, 0);
+
+  // The correspondence checks every figure on the site gets, with all of the
+  // walkthrough open: each slider symbol is drawn, and no value slot is empty.
+  const survey = await page.evaluate(() => {
+    const visible = (el) => !!(el.getBoundingClientRect().width || el.getBoundingClientRect().height);
+    const keys = (el) => (el.getAttribute('data-sym') || '').trim().split(/\s+/).filter(Boolean);
+    const figs = [...document.querySelectorAll('.sysfig')].filter(visible);
+    const drawn = new Set(figs.flatMap((fig) => [...fig.querySelectorAll('[data-sym]')].flatMap(keys)));
+    const empty = figs.flatMap((fig) => [...fig.querySelectorAll('[data-val]')])
+      .filter((el) => !(el.textContent || '').trim()).map((el) => el.getAttribute('data-val'));
+    const controls = [...document.querySelectorAll('label[data-sym]')].filter(visible).map((el) => keys(el)[0]);
+    return { figures: figs.length, undrawn: controls.filter((key) => !drawn.has(key)), empty };
+  });
+  report.check('derivation: every slider symbol is drawn and every value slot is filled',
+               survey.figures === 3 && survey.undrawn.length === 0 && survey.empty.length === 0,
+               `${survey.figures} figures | undrawn ${survey.undrawn} | empty ${survey.empty}`);
+  await shoot(page, 'derivation-all');
+
+  await page.click('#dv-prev');
+  report.check('derivation: back folds the last step away again', await steps() === 4);
+
+  // Phone width with everything open: maths and diagrams scroll in their own
+  // boxes, the page itself does not.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${url}#all`, { waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'networkidle' });
+  const { overflow, scrollWidth, clientWidth } = await horizontalOverflow(page);
+  report.check('derivation: #all opens every step, and nothing scrolls sideways at 390px',
+               await steps() === 5 && await page.locator('#dv-after2').isVisible() && overflow <= 1,
+               `${await steps()} steps, scrollWidth ${scrollWidth} vs ${clientWidth}`);
+  await shoot(page, 'derivation-mobile');
+  await page.goto(`${url}#step-3`, { waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'networkidle' });
+  report.check('derivation: #step-3 opens the first three steps', await steps() === 3, `${await steps()} visible`);
+
+  report.check('derivation: no console errors', errors.length === 0, errors.join(' | '));
+}
+
 async function checkInputDecoupling(page, origin, report) {
   const errors = watchErrors(page);
   await page.goto(`${origin}/interactives/input-decoupling/`, { waitUntil: 'networkidle' });
@@ -1148,6 +1369,371 @@ async function checkPICurrentRegulator(page, origin, report) {
   report.check('pi: no console errors', errors.length === 0, errors.join(' | '));
 }
 
+/* ------------------------------------------------------------------ */
+/* Week 7: motion control.                                             */
+/*                                                                     */
+/* Poles are found here by bisection and deflation, and responses by   */
+/* complex arithmetic on the transfer functions, so the components'    */
+/* Durand-Kerner roots and matrix exponentials are checked rather than */
+/* trusted.                                                            */
+
+/** Roots of a s^3 + b s^2 + c s + d with positive coefficients: one real root
+ *  by bisection on the negative axis, the other two from the deflated quadratic. */
+function cubicRoots(a, b, c, d) {
+  const f = (s) => ((a * s + b) * s + c) * s + d;
+  let lo = -1, hi = 0;
+  while (f(lo) > 0) lo *= 2;
+  for (let i = 0; i < 200; i++) { const m = (lo + hi) / 2; if (f(m) > 0) hi = m; else lo = m; }
+  const r = (lo + hi) / 2;
+  const b1 = b + a * r, c1 = c + b1 * r;
+  const disc = b1 * b1 - 4 * a * c1;
+  const q = disc >= 0
+    ? [[(-b1 + Math.sqrt(disc)) / (2 * a), 0], [(-b1 - Math.sqrt(disc)) / (2 * a), 0]]
+    : [[-b1 / (2 * a), Math.sqrt(-disc) / (2 * a)], [-b1 / (2 * a), -Math.sqrt(-disc) / (2 * a)]];
+  return [[r, 0], ...q];
+}
+const cx = {
+  mul: (p, q) => [p[0] * q[0] - p[1] * q[1], p[0] * q[1] + p[1] * q[0]],
+  div: (p, q) => { const m = q[0] * q[0] + q[1] * q[1]; return [(p[0] * q[0] + p[1] * q[1]) / m, (p[1] * q[0] - p[0] * q[1]) / m]; },
+  abs: (p) => Math.hypot(p[0], p[1]),
+  poly: (cs, s) => cs.reduce((acc, c) => { const m = [acc[0] * s[0] - acc[1] * s[1], acc[0] * s[1] + acc[1] * s[0]]; return [m[0] + c, m[1]]; }, [0, 0]),
+};
+
+async function checkMotionStiffnessTuning(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/motion-stiffness-tuning/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#mst-frf', '#mst-step']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`mst: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#mst-readout').innerText()).replace(/\s+/g, ' ');
+  const gainsOf = (fv, fp, fip, J = 1e-5, bp = 1e-5) => {
+    const ba = J * 2 * Math.PI * fv - bp, B = bp + ba, Ks = B * 2 * Math.PI * fp, Ki = Ks * 2 * Math.PI * fip;
+    return { J, ba, B, Ks, Ki };
+  };
+  const poleText = (g) => cubicRoots(g.J, g.B, g.Ks, g.Ki)
+    .sort((p, q) => Math.hypot(...q) - Math.hypot(...p)).filter((p) => p[1] >= 0)
+    .map((p) => (p[1] > 0 ? `${sig(p[0] / (2 * Math.PI))} ± j${sig(p[1] / (2 * Math.PI))}` : sig(p[0] / (2 * Math.PI))))
+    .join(', ');
+
+  // Defaults: 100 / 5 / 0.1 Hz, J = b_p = 1e-5.
+  let g = gainsOf(100, 10 ** 0.699, 0.1);
+  let text = await read();
+  report.check('mst: gains follow the asymptote rule',
+               text.includes(`= ${sig(g.ba)} N·m·s/rad`) && text.includes(`= ${sig(g.Ks)} N·m/rad`)
+               && text.includes(`= ${sig(g.Ki)} N·m/(rad·s)`), text.slice(0, 200));
+  report.check('mst: closed-loop poles are the roots of J s³ + (bp+ba) s² + Ksa s + Kisa',
+               text.includes(`${poleText(g)} Hz`), `expect ${poleText(g)} | ${text.slice(200, 300)}`);
+  // The floor of |T_L/theta| found by a dense scan here.
+  let floor = Infinity;
+  for (let k = 0; k <= 4000; k++) {
+    const w = 2 * Math.PI * 10 ** (-2 + (5 * k) / 4000);
+    floor = Math.min(floor, Math.hypot(g.Ks - g.J * w * w, g.B * w - g.Ki / w));
+  }
+  report.check('mst: the stiffness floor is Ksa when the loops are a decade apart',
+               text.includes(`min |TL/θ| = ${sig(floor)} N·m/rad`) && sig(floor) === sig(g.Ks), `scan ${sig(floor)}, Ksa ${sig(g.Ks)}`);
+  report.check('mst: exact and RK4 agree', /the two agree/.test(text), text.slice(-260));
+  await shoot(page, 'mst-default');
+
+  // Doubling f_ip doubles K_isa and leaves b_a and K_sa alone.
+  await page.click('#mst button[data-f="100,5,0.2"]');
+  await page.waitForTimeout(80);
+  const g2 = gainsOf(100, 5, 0.2);
+  text = await read();
+  report.check('mst: doubling f_ip doubles Kisa only',
+               text.includes(`= ${sig(g2.Ki)} N·m/(rad·s)`) && text.includes(`= ${sig(g2.Ks)} N·m/rad`)
+               && near(g2.Ki / gainsOf(100, 5, 0.1).Ki, 2, 1e-12), text.slice(0, 200));
+
+  // Crowded loops: two poles go complex, and the tool says so.
+  await page.click('#mst button[data-f="20,6,2"]');
+  await page.waitForTimeout(80);
+  g = gainsOf(20, 6, 2);
+  text = await read();
+  const crowdedPoles = poleText(g);
+  report.check('mst: crowded loops give a complex pair, reported as such',
+               crowdedPoles.includes('± j') && text.includes(`${crowdedPoles} Hz`) && /complex pair/.test(text),
+               `expect ${crowdedPoles} | ${text.slice(200, 320)}`);
+  report.check('mst: crowded case still agrees with RK4', /the two agree/.test(text));
+  await shoot(page, 'mst-crowded');
+
+  // More bearing drag than the velocity loop asks for: b_a would be negative.
+  await setRange(page, '#mst-fv', 1);
+  await setRange(page, '#mst-bp', -2);
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('mst: a negative b_a is reported, not hidden', /comes out negative/.test(text), text.slice(-220));
+
+  // Regression: f_v = f_ip puts two poles on the imaginary axis (Routh), and
+  // "simulate until the slowest pole decays" used to run forever there.
+  await setRange(page, '#mst-bp', -5);
+  let t0 = Date.now();
+  await setRange(page, '#mst-fip', 1);
+  await page.waitForTimeout(50);
+  text = await read();
+  report.check('mst: f_v = f_ip is reported as marginal and does not hang',
+               /imaginary axis/.test(text) && Date.now() - t0 < 5000, `${Date.now() - t0} ms | ${text.slice(-200)}`);
+  // Just inside it: whether the window had to be capped is decided here from
+  // the roots, and the readout must either agree with RK4 or say it is unsettled.
+  await setRange(page, '#mst-fip', 0.999);
+  await page.waitForTimeout(50);
+  text = await read();
+  {
+    const wv = 2 * Math.PI * 10, wp = 2 * Math.PI * 6, wi = 2 * Math.PI * 10 ** 0.999;
+    const r = cubicRoots(1, wv, wv * wp, wv * wp * wi);
+    const slow = Math.min(...r.map((z) => Math.abs(z[0]))), fast = Math.max(...r.map((z) => Math.hypot(...z)));
+    // The tool's stated policy: 8/slow, at most 2e4/fast, at most 50 cycles of
+    // any pair with zeta < 0.02.
+    const ring = r.filter((z) => Math.abs(z[1]) > 0 && -z[0] < 0.02 * Math.hypot(...z));
+    const cap = Math.min(2e4 / fast, ...ring.map((z) => 50 * 2 * Math.PI / Math.abs(z[1])));
+    const capped = 8 / slow > cap;
+    report.check(`mst: just inside the boundary RK4 agrees${capped ? ' and the capped window says it is unsettled' : ''}`,
+                 /the two agree/.test(text) && (!capped || /not settled/.test(text)),
+                 `slow ${slow.toExponential(2)} rad/s | ${text.slice(text.indexOf('load step'), text.indexOf('load step') + 200)}`);
+  }
+  report.check('mst: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkMotionCommandPaths(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/motion-command-paths/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#mcp-frf', '#mcp-time']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`mcp: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#mcp-readout').innerText()).replace(/\s+/g, ' ');
+  const J = 1e-5, bp = 1e-5, fc = 10, fv = 100, fp = 10 ** 0.699, fip = 0.1;
+  const ba = J * 2 * Math.PI * fv - bp, B = bp + ba, Ks = B * 2 * Math.PI * fp, Ki = Ks * 2 * Math.PI * fip;
+  const Kpp = (Ks + Math.sqrt(Ks * Ks - 4 * ba * Ki)) / (2 * ba), Kiv = Ki / Kpp;
+  const den = [J, B, Ks, Ki];
+  const nums = { 'sfb-w': [ba, Ks, Ki], 'sfb': [0, Ks, Ki], 'cls': [0, Kpp * ba, Kpp * Kiv], 'cls-ff': [ba, Ks, Ki] };
+  const s = [0, 2 * Math.PI * fc];
+  const row = (k) => {
+    const H = cx.div(cx.poly(nums[k], s), cx.poly(den, s));
+    return `|θ/θ*| = ${sig(cx.abs(H))}, ${sig(Math.atan2(H[1], H[0]) * 180 / Math.PI)}°`;
+  };
+
+  let text = await read();
+  report.check('mcp: classical gains map onto the state feedback poles',
+               text.includes(`Kpp = ${sig(Kpp)} 1/s`) && text.includes(`Kiv = ${sig(Kiv)} N·m/(rad·s)`)
+               && near(Kpp * ba + Kiv, Ks, 1e-9 * Ks) && near(Kpp * Kiv, Ki, 1e-9 * Ki), text.slice(0, 220));
+  report.check('mcp: every path\'s response at fc matches its transfer function',
+               Object.keys(nums).every((k) => text.includes(row(k))),
+               `${Object.keys(nums).map(row).join(' | ')} || ${text.slice(280, 620)}`);
+  report.check('mcp: velocity feedforward makes the cascade the state controller with ω*',
+               row('sfb-w') === row('cls-ff') && row('sfb-w') !== row('sfb'));
+
+  for (const path of ['sfb-w', 'sfb', 'cls', 'cls-ff']) {
+    await page.selectOption('#mcp-path', path);
+    await page.waitForTimeout(120);
+    text = await read();
+    const H = cx.div(cx.poly(nums[path], s), cx.poly(den, s));
+    const err = Math.hypot(1 - H[0], H[1]);
+    report.check(`mcp: ${path} run settles to the closed-form error amplitude ${sig(err)} rad`,
+                 text.includes(`: ${sig(err)} rad closed form ${sig(err)} rad`) && /the two agree/.test(text),
+                 text.slice(text.indexOf('this run'), text.indexOf('this run') + 140));
+    const clsShown = await page.locator('#mcp-fig-cls').isVisible();
+    const sfbShown = await page.locator('#mcp-fig-sfb').isVisible();
+    report.check(`mcp: ${path} shows the ${path.startsWith('cls') ? 'cascade' : 'state feedback'} diagram`,
+                 path.startsWith('cls') ? clsShown && !sfbShown : sfbShown && !clsShown);
+  }
+  await shoot(page, 'mcp-cls-ff');
+
+  // Position and integral loops on top of each other: no real cascade gives these poles.
+  await setRange(page, '#mcp-fp', -0.301);
+  await setRange(page, '#mcp-fip', -0.301);
+  await page.selectOption('#mcp-path', 'cls');
+  await page.waitForTimeout(120);
+  text = await read();
+  report.check('mcp: a cascade that cannot exist is reported, not drawn',
+               /no real Kpp, Kiv/.test(text) && /K_?pp would be complex|Kpp would be complex/.test(text), text.slice(0, 260));
+  // Regression: f_v = f_ip is the Routh boundary; the start-up never dies away.
+  await page.selectOption('#mcp-path', 'sfb-w');
+  await setRange(page, '#mcp-fv', 1);
+  const t0 = Date.now();
+  await setRange(page, '#mcp-fip', 1);
+  await page.waitForTimeout(50);
+  text = await read();
+  report.check('mcp: at f_v = f_ip the run reports an unsettled start-up and does not hang',
+               /not died away/.test(text) && Date.now() - t0 < 5000, `${Date.now() - t0} ms | ${text.slice(text.indexOf('this run'), text.indexOf('this run') + 160)}`);
+  report.check('mcp: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkResonantLoad(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/resonant-load/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#rsl-frf', '#rsl-step']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`rsl: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#rsl-readout').innerText()).replace(/\s+/g, ' ');
+  const Jm = 1e-4, JL = 10 ** -3.5, Kr = 1e4;
+  const Jpar = Jm * JL / (Jm + JL);
+  const f1 = Math.sqrt(Kr / Jm) / (2 * Math.PI), f2 = Math.sqrt(Kr / Jpar) / (2 * Math.PI);
+
+  let text = await read();
+  report.check('rsl: peak at √(Kr/Jm) and notch at √(Kr/J∥)',
+               text.includes(`= ${sig(f1)} Hz`) && text.includes(`= ${sig(f2)} Hz`), text.slice(0, 160));
+  report.check('rsl: the bare mechanism is free: two poles at the origin, zero static stiffness',
+               /2 poles at s = 0/.test(text) && /at 0 Hz = 0 /.test(text), text.slice(150, 330));
+  report.check('rsl: exact and RK4 agree', /the two agree/.test(text));
+  const sliderOff = await page.locator('#rsl label[data-sym="Khat"]').evaluate((el) => el.classList.contains('is-off'));
+  report.check('rsl: the K̂r slider stays usable while its parts are greyed', !sliderOff);
+
+  // K_hat_r = K_r: the motor stops moving and the load rings at sqrt(Kr/JL).
+  await page.click('#rsl button[data-kh="1"]');
+  await page.waitForTimeout(100);
+  text = await read();
+  const modes = [...text.matchAll(/([\d.e+-]+) Hz, ζ =/g)].map((m) => parseFloat(m[1]));
+  const want = [Math.sqrt(Kr / JL), Math.sqrt(Kr / Jm)].map((w) => w / (2 * Math.PI)).sort((a, b) => a - b);
+  report.check('rsl: ideal decoupling factors into √(Kr/JL) and √(Kr/Jm)',
+               modes.length === 2 && modes.every((m, i) => Math.abs(m - want[i]) / want[i] < 2e-3),
+               `modes ${modes.join(', ')} vs ${want.map((w) => sig(w)).join(', ')}`);
+  const range = (name) => {
+    const m = text.match(new RegExp(`${name} from ([-\\d.e+]+) to ([-\\d.e+]+) rad`));
+    return m ? Math.abs(parseFloat(m[2]) - parseFloat(m[1])) : NaN;
+  };
+  report.check('rsl: with K̂r = Kr the motor barely moves and the load swings',
+               range('θm') < 0.02 * range('θL'), `θm ${range('θm')}, θL ${range('θL')}`);
+  await shoot(page, 'rsl-decoupled');
+
+  await page.click('#rsl button[data-kh="0.3"]');
+  await page.waitForTimeout(100);
+  text = await read();
+  report.check('rsl: partial decoupling acts as a spring of K̂r', text.includes(`−TL/K̂r = ${sig(-1 / (0.3 * Kr))} rad`),
+               text.slice(150, 360));
+
+  // Equal inertias put two poles on top of each other at K̂r = Kr.
+  await setRange(page, '#rsl-jl', -4);
+  await page.click('#rsl button[data-kh="1"]');
+  await page.waitForTimeout(100);
+  text = await read();
+  report.check('rsl: coincident poles still agree with RK4 and print numbers',
+               /the two agree/.test(text) && !/NaN|Infinity/.test(text), text.slice(-300));
+  report.check('rsl: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+async function checkStiffnessBandwidth(page, origin, report) {
+  const errors = watchErrors(page);
+  await page.goto(`${origin}/interactives/stiffness-bandwidth/`, { waitUntil: 'networkidle' });
+  for (const sel of ['#sbw-ds', '#sbw-bode', '#sbw-step', '#sbw-sine']) {
+    const ink = await canvasInk(page, sel);
+    report.check(`sbw: ${sel} has ink`, ink.painted > 400, `${ink.painted} painted`);
+  }
+  const read = async () => (await page.locator('#sbw-readout').innerText()).replace(/\s+/g, ' ');
+  const num = (text, re) => { const m = text.match(re); return m ? m[1] : null; };
+  const W = 2 * Math.PI;
+  const J = 1e-5, bp = 1e-5;
+  const ba = J * W * 100 - bp, B = bp + ba, Ks = B * W * 5, Ki = Ks * W * 0.1;
+
+  // Independent: crossings, poles, Bode readings, all from the gains.
+  const fv = B / (W * J), fp = Ks / (W * B), fip = Ki / (W * Ks);
+  const H = (n, f) => cx.div(cx.poly(n, [0, W * f]), cx.poly([J, B, Ks, Ki], [0, W * f]));
+  const posLoop = (f) => { const w = W * f; return Math.hypot(Ks, Ki / w) / (w * Math.hypot(B, J * w)); };
+  const firstBelow = (g, level) => {
+    let prev = -6;
+    for (let k = 1; k <= 24000; k++) {
+      const lf = -6 + (12 * k) / 24000;
+      if (g(10 ** lf) < level) {
+        let lo = prev, hi = lf;
+        for (let it = 0; it < 80; it++) { const m = (lo + hi) / 2; if (g(10 ** m) > level) lo = m; else hi = m; }
+        return 10 ** ((lo + hi) / 2);
+      }
+      prev = lf;
+    }
+    return NaN;
+  };
+  const fPos = firstBelow(posLoop, 1);
+  const bwW = firstBelow((f) => cx.abs(H([ba, Ks, Ki], f)), Math.SQRT1_2);
+  const bw0 = firstBelow((f) => cx.abs(H([0, Ks, Ki], f)), Math.SQRT1_2);
+  const poleText = cubicRoots(J, B, Ks, Ki)
+    .sort((p, q) => Math.hypot(...q) - Math.hypot(...p)).filter((p) => p[1] >= 0)
+    .map((p) => (p[1] > 0 ? `${sig(p[0] / W)} ± j${sig(p[1] / W)}` : sig(p[0] / W))).join(', ');
+
+  let text = await read();
+  report.check('sbw: crossings computed from the gains land at 100 / 5 / 0.1 Hz',
+               num(text, /2πJp = ([\d.e+-]+) Hz/) === sig(fv) && num(text, /\(bp \+ ba\) = ([\d.e+-]+) Hz/) === sig(fp)
+               && num(text, /2πKsa = ([\d.e+-]+) Hz/) === sig(fip) && sig(fv) === '100' && sig(fip) === '0.1', text.slice(0, 200));
+  report.check('sbw: closed-loop poles are the roots of J s³ + (bp+ba) s² + Ksa s + Kisa',
+               text.includes(`${poleText} Hz`), `expect ${poleText} | ${text.slice(180, 290)}`);
+  report.check('sbw: the velocity loop alone is −3 dB exactly at f_v',
+               num(text, /alone: −3 dB at ([\d.e+-]+) Hz/) === sig(fv), text.slice(280, 420));
+  report.check('sbw: the position loop gain crosses 1 where an independent bisection says',
+               num(text, /\|L\| = 1 at ([\d.e+-]+) Hz/) === sig(fPos), `expect ${sig(fPos)} | ${text.slice(300, 440)}`);
+  report.check('sbw: closed-loop −3 dB with and without ω* match the transfer functions',
+               num(text, /with ω\*: ([\d.e+-]+) Hz/) === sig(bwW) && num(text, /without ω\*: ([\d.e+-]+) Hz/) === sig(bw0),
+               `expect ${sig(bwW)}, ${sig(bw0)} | ${text.slice(400, 520)}`);
+  const atFc = (n) => { const h = H(n, 10); return `|θ/θ*| = ${sig(cx.abs(h))}, ${sig(Math.atan2(h[1], h[0]) * 180 / Math.PI)}°`; };
+  report.check('sbw: at fc the Bode value is |N/D| with ω*, and the exact time trace agrees',
+               text.includes(atFc([ba, Ks, Ki])) && /the two agree/.test(text),
+               `expect ${atFc([ba, Ks, Ki])} | ${text.slice(text.indexOf('at fc'), text.indexOf('at fc') + 160)}`);
+  const peak = parseFloat(num(text, /peak θ = ([-\d.e+]+) rad/));
+  const fin = parseFloat(([...text.matchAll(/θ = ([-\d.e+]+) rad at/g)].pop() ?? [])[1]);   // the last one: the end of the window
+  report.check('sbw: the integral loop brings the load step back to zero',
+               isFinite(peak) && isFinite(fin) && Math.abs(fin) < 1e-3 * Math.abs(peak), `peak ${peak}, final ${fin}`);
+  await shoot(page, 'sbw-default');
+
+  // Without omega*: the figure greys the omega* input and the Bode marker moves to the other curve.
+  await page.uncheck('#sbw-wstar');
+  await page.waitForTimeout(80);
+  text = await read();
+  const greyed = await page.locator('#sbw .sysfig .is-off').count();
+  const labelOff = await page.locator('#sbw label[data-sym="wstar"]').evaluate((el) => el.classList.contains('is-off'));
+  report.check('sbw: unticking ω* greys its input in the figure, not the checkbox',
+               greyed > 0 && !labelOff, `${greyed} greyed, label off ${labelOff}`);
+  report.check('sbw: without ω* the fc reading is |(Ksa s + Kisa)/D| and still agrees with the trace',
+               text.includes(atFc([0, Ks, Ki])) && /the two agree/.test(text),
+               `expect ${atFc([0, Ks, Ki])} | ${text.slice(text.indexOf('at fc'), text.indexOf('at fc') + 160)}`);
+  await page.check('#sbw-wstar');
+
+  // Each gain moves its own crossings: K_isa only f_ip; K_sa both f_p and f_ip; b_a both f_v and f_p.
+  const crossings = (t) => [/2πJp = ([\d.e+-]+) Hz/, /\(bp \+ ba\) = ([\d.e+-]+) Hz/, /2πKsa = ([\d.e+-]+) Hz/].map((re) => num(t, re));
+  await setRange(page, '#sbw-ki', Math.log10(2 * Ki));
+  await page.waitForTimeout(80);
+  let c = crossings(await read());
+  report.check('sbw: doubling K_isa doubles f_ip and leaves f_v and f_p', c[0] === '100' && c[1] === '5' && c[2] === '0.2', c.join(', '));
+  await setRange(page, '#sbw-ki', Math.log10(Ki));
+  await setRange(page, '#sbw-ks', Math.log10(2 * Ks));
+  await page.waitForTimeout(80);
+  c = crossings(await read());
+  report.check('sbw: doubling K_sa doubles f_p and halves f_ip, f_v unchanged', c[0] === '100' && c[1] === '10' && c[2] === '0.05', c.join(', '));
+  await setRange(page, '#sbw-ks', Math.log10(Ks));
+
+  // Compliance view is the same curve upside down.
+  await page.check('#sbw-flip');
+  await page.waitForTimeout(80);
+  const cap = await page.locator('#sbw-ds-cap').innerText();
+  const inkFlip = await canvasInk(page, '#sbw-ds');
+  report.check('sbw: the flip draws compliance and says it is a Bode plot', /Bode magnitude/.test(cap) && inkFlip.painted > 400, cap);
+  await page.uncheck('#sbw-flip');
+
+  // f_ip above f_v: Routh fails, exactly as the crossings predict, and nothing hangs or prints NaN.
+  const t0 = Date.now();
+  await page.click('#sbw button[data-f="100,5,150"]');
+  await page.waitForTimeout(80);
+  text = await read();
+  report.check('sbw: f_ip above f_v is reported unstable via Routh written with the crossings',
+               /Unstable/.test(text) && /exactly fip < fv/.test(text) && !/NaN|Infinity/.test(text) && Date.now() - t0 < 5000,
+               `${Date.now() - t0} ms | ${text.slice(-300)}`);
+  report.check('sbw: no console errors', errors.length === 0, errors.join(' | '));
+}
+
+/**
+ * The /interactives/ index is written week by week by hand, so a tool can be
+ * built, registered and verified and still never be linked from it (week 7's
+ * four tools were, until this check). Every built tool page must be linked.
+ */
+async function checkIndexListsEveryTool(page, origin, report) {
+  const built = fs.readdirSync(path.join(DIST, 'interactives'), { withFileTypes: true })
+    .filter((d) => d.isDirectory() && fs.existsSync(path.join(DIST, 'interactives', d.name, 'index.html')))
+    .map((d) => d.name);
+  await page.goto(`${origin}/interactives/`, { waitUntil: 'networkidle' });
+  const linked = await page.locator('main a[href*="/interactives/"]').evaluateAll((as) =>
+    as.map((a) => new URL(a.href).pathname.split('/').filter(Boolean).pop()));
+  const missing = built.filter((name) => !linked.includes(name));
+  report.check('index: every built tool page is linked from /interactives/', missing.length === 0,
+               `${built.length} pages, missing: ${missing.join(', ') || 'none'}`);
+}
+
 /**
  * The figures above each tool: the device, and the same system as a block
  * diagram.
@@ -1167,6 +1753,7 @@ const FIGURE_ROUTES = [
   'voltage-source-stiffness', 'eigenvalue-migration', 'motor-transfer-matrix',
   'motor-state-feedback', 'input-decoupling', 'disturbance-decoupling',
   'virtual-zero-reference', 'pi-current-regulator',
+  'motion-stiffness-tuning', 'motion-command-paths', 'resonant-load', 'stiffness-bandwidth',
 ];
 
 async function checkSystemFigures(page, origin, report) {
@@ -1256,9 +1843,10 @@ async function main() {
                             checkDiagramDecomposition, checkPhysicalActive, checkLinearization,
                             checkDynamicStiffness, checkVoltageSourceStiffness,
                             checkEigenvalueMigration, checkMotorTransferMatrix,
-                            checkMotorStateFeedback, checkInputDecoupling,
+                            checkMotorStateFeedback, checkDecouplingDerivation, checkInputDecoupling,
                             checkDisturbanceDecoupling, checkVirtualZeroReference,
-                            checkPICurrentRegulator, checkSystemFigures]) {
+                            checkPICurrentRegulator, checkMotionStiffnessTuning,
+                            checkMotionCommandPaths, checkResonantLoad, checkStiffnessBandwidth, checkSystemFigures, checkIndexListsEveryTool]) {
       const page = await ctx.newPage();
       await scenario(page, server.origin, report);
       await page.close();

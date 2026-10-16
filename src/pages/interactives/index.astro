@@ -1,11 +1,11 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import { href } from '../../lib/href';
-import { week1 as w1, week2 as w2, week3 as w3, week4 as w4, week5 as w5, week6 as w6 } from '../../lib/interactives';
+import { week1 as w1, week2 as w2, week3 as w3, week4 as w4, week5 as w5, week6 as w6, week7 as w7 } from '../../lib/interactives';
 
 const withHref = (items) => items.map((i) => ({ ...i, href: href(i.href) }));
 const week1 = withHref(w1), week2 = withHref(w2), week3 = withHref(w3), week4 = withHref(w4);
-const week5 = withHref(w5), week6 = withHref(w6);
+const week5 = withHref(w5), week6 = withHref(w6), week7 = withHref(w7);
 ---
 
 <BaseLayout title="Interactives — ECE/ME 732">
@@ -14,6 +14,17 @@ const week5 = withHref(w5), week6 = withHref(w6);
     Tools for building intuition, grouped by the week they support. Everything runs in
     the browser.
   </p>
+
+  <h2>Week 7: State feedback motion control, and resonant loads</h2>
+  <ul class="card-list">
+    {week7.map((item) => (
+      <li>
+        <a href={item.href}><h2>{item.title}</h2></a>
+        <p class="lecture-ref">{item.lecture}</p>
+        <p>{item.blurb}</p>
+      </li>
+    ))}
+  </ul>
 
   <h2>Week 6: Virtual zero references and current regulation</h2>
   <ul class="card-list">

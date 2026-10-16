@@ -1,0 +1,256 @@
+---
+// Resonant load: motor and load inertias joined by a compliant shaft (W7L2,
+// slides 22-30).
+//
+// With the shaft torque T_sh = K_r(theta_L - theta_m) + b_r(omega_L - omega_m)
+//
+//   J_m s^2 theta_m =  T_sh + T_m
+//   J_L s^2 theta_L = -T_sh - T_L
+//
+// and the motor torque set to T_m = -K_hat_r theta_L ("decouple the load from
+// the motor"), the stiffness the load torque sees is
+//
+//   T_L/theta_L = -[J_m J_L s^4 + (J_m + J_L)(K_r + b_r s) s^2 + (K_r + b_r s) K_hat_r]
+//                 / (J_m s^2 + b_r s + K_r)
+//
+// K_hat_r = 0 is the bare mechanism: (J_m + J_L) w^2 at low frequency, J_L w^2
+// at high frequency, a peak at sqrt(K_r/J_m) and a notch at
+// sqrt(K_r/J_parallel) between them. Raising K_hat_r to K_r cancels the
+// shaft's pull on the motor exactly, and what is left is the load hanging on
+// an undamped spring -- the slide's warning about blind decoupling. The time
+// trace is RK4 on the four states over the exact solution (matrix exponential
+// of the system augmented with the step input), which is exact even where two
+// poles coincide.
+import SystemFigures from './SystemFigures.astro';
+import { resonantLoadFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="rsl">
+  <SystemFigures {...resonantLoadFigures} />
+
+  <div class="controls">
+    <div class="param-grid">
+      <label class="slider" data-sym="Jm">J<sub>m</sub>
+        <input type="range" id="rsl-jm" min="-5" max="-2" step="0.05" value="-4" />
+        <output id="rsl-jm-v">1e-4</output> kg·m²</label>
+      <label class="slider" data-sym="JL">J<sub>L</sub>
+        <input type="range" id="rsl-jl" min="-5" max="-2" step="0.05" value="-3.5" />
+        <output id="rsl-jl-v">3.2e-4</output> kg·m²</label>
+      <label class="slider" data-sym="Kr">K<sub>r</sub>
+        <input type="range" id="rsl-kr" min="2" max="6" step="0.05" value="4" />
+        <output id="rsl-kr-v">1e4</output> N·m/rad</label>
+      <label class="slider" data-sym="br">b<sub>r</sub>
+        <input type="range" id="rsl-br" min="-6" max="0" step="0.05" value="-3" />
+        <output id="rsl-br-v">1e-3</output> N·m·s/rad</label>
+      <label class="slider" data-sym="Khat">K̂<sub>r</sub> / K<sub>r</sub>
+        <input type="range" id="rsl-kh" min="0" max="1.2" step="0.01" value="0" />
+        <output id="rsl-kh-v">0.00</output></label>
+    </div>
+    <div class="presets">
+      <button data-kh="0">no controller</button>
+      <button data-kh="0.3">partial decoupling</button>
+      <button data-kh="1">K̂<sub>r</sub> = K<sub>r</sub></button>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="rsl-frf" role="img" aria-label="Dynamic stiffness at the load against frequency"></canvas>
+      <figcaption>|T<sub>L</sub>/θ<sub>L</sub>| (N·m/rad), log-log, with the two inertia asymptotes</figcaption>
+    </figure>
+    <figure>
+      <canvas id="rsl-step" role="img" aria-label="Motor and load angles after a one newton-metre load step"></canvas>
+      <figcaption>θ<sub>L</sub> (heavy) and θ<sub>m</sub> (light) after a 1 N·m step in T<sub>L</sub></figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="rsl-readout"></div>
+</div>
+
+<script>
+  import { type Cx, cAbs, polyEval, polyRoots, expm, matVec } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors, decades, decadeLabel } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues, setFigureActive } from '../lib/figure-sync';
+
+  const root = document.getElementById('rsl')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+  const jmEl = q<HTMLInputElement>('#rsl-jm');
+  const jlEl = q<HTMLInputElement>('#rsl-jl');
+  const krEl = q<HTMLInputElement>('#rsl-kr');
+  const brEl = q<HTMLInputElement>('#rsl-br');
+  const khEl = q<HTMLInputElement>('#rsl-kh');
+  const frfCanvas = q<HTMLCanvasElement>('#rsl-frf');
+  const stepCanvas = q<HTMLCanvasElement>('#rsl-step');
+  const readout = q<HTMLDivElement>('#rsl-readout');
+
+  const TWO_PI = 2 * Math.PI;
+  const TL = 1;                    // N m step
+  const N_OUT = 700;
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+
+  /** States [theta_m, omega_m, theta_L, omega_L]; input T_L. */
+  function system(Jm: number, JL: number, Kr: number, br: number, Kh: number) {
+    const A = [
+      [0, 1, 0, 0],
+      [-Kr / Jm, -br / Jm, (Kr - Kh) / Jm, br / Jm],
+      [0, 0, 0, 1],
+      [Kr / JL, br / JL, -Kr / JL, -br / JL],
+    ];
+    const B = [0, 0, 0, -1 / JL];
+    return { A, B };
+  }
+
+  function draw() {
+    const Jm = Math.pow(10, parseFloat(jmEl.value));
+    const JL = Math.pow(10, parseFloat(jlEl.value));
+    const Kr = Math.pow(10, parseFloat(krEl.value));
+    const br = Math.pow(10, parseFloat(brEl.value));
+    const ratio = parseFloat(khEl.value);
+    const Kh = ratio * Kr;
+    const Jpar = (Jm * JL) / (Jm + JL);
+    const w1 = Math.sqrt(Kr / Jm), w2 = Math.sqrt(Kr / Jpar);
+
+    q<HTMLOutputElement>('#rsl-jm-v').value = Jm.toExponential(1);
+    q<HTMLOutputElement>('#rsl-jl-v').value = JL.toExponential(1);
+    q<HTMLOutputElement>('#rsl-kr-v').value = Kr.toExponential(1);
+    q<HTMLOutputElement>('#rsl-br-v').value = br.toExponential(1);
+    q<HTMLOutputElement>('#rsl-kh-v').value = ratio.toFixed(2);
+    setFigureValues(root, {
+      Jm: `${Jm.toExponential(1)}`, JL: `${JL.toExponential(1)}`,
+      Kr: `${Kr.toExponential(1)} N·m/rad`, br: `${br.toExponential(1)}`,
+      Khat: `${sig(Kh)} N·m/rad`,
+    });
+    // Grey the parts in the figures only: the slider must stay usable at 0.
+    root.querySelectorAll('.sysfig').forEach((fig) => setFigureActive(fig, { Khat: ratio > 0 }));
+
+    // Numerator (characteristic polynomial) and denominator of -T_L/theta_L.
+    const num = [Jm * JL, (Jm + JL) * br, (Jm + JL) * Kr, br * Kh, Kr * Kh];
+    const den = [Jm, br, Kr];
+    const ds = (f: number) => {
+      const s: Cx = [0, TWO_PI * f];
+      return cAbs(polyEval(num, s)) / cAbs(polyEval(den, s));
+    };
+    const colors = themeColors();
+
+    /* ---------------- dynamic stiffness ---------------- */
+    const F_LO = Math.floor(Math.log10(w1 / TWO_PI) - 2);
+    const F_HI = Math.ceil(Math.log10(w2 / TWO_PI) + 1.5);
+    const lfs = Array.from({ length: 601 }, (_, n) => F_LO + ((F_HI - F_LO) * n) / 600);
+    // The notch and the peak are sharp when b_r is small; sample them exactly.
+    const zeros = polyRoots(num).filter((z) => z[1] > 0).map((z) => Math.log10(Math.abs(z[1]) / TWO_PI));
+    for (const lf of [Math.log10(w1 / TWO_PI), ...zeros]) if (lf > F_LO && lf < F_HI) lfs.push(lf);
+    lfs.sort((a, b) => a - b);
+    const curve = lfs.map((lf) => [lf, Math.log10(ds(Math.pow(10, lf)))] as [number, number]);
+    const lowAs = lfs.map((lf) => [lf, Math.log10((Jm + JL) * Math.pow(TWO_PI * Math.pow(10, lf), 2))] as [number, number]);
+    const highAs = lfs.map((lf) => [lf, Math.log10(JL * Math.pow(TWO_PI * Math.pow(10, lf), 2))] as [number, number]);
+    const finite = curve.map(([, y]) => y).filter(isFinite);
+    const yHi = Math.min(Math.ceil(Math.max(...finite)), Math.ceil(Math.max(...lowAs.map(([, y]) => y))) + 2);
+    const yLo = Math.max(Math.floor(Math.min(...finite)), yHi - 9);
+    const clip = (pts: Array<[number, number]>) => pts.map(([x, y]) => [x, Math.min(yHi, Math.max(yLo, y))] as [number, number]);
+    const fv_ = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: yLo, yMax: yHi, pad: 38 });
+    drawAxes(fv_, {
+      xTicks: decades(F_LO, F_HI), yTicks: decades(yLo, yHi).filter((e, i, a) => a.length < 8 || i % 2 === 0),
+      xTickLabel: decadeLabel, yTickLabel: decadeLabel, xLabel: 'f [Hz]', yLabel: '|TL/θL|', origin: false,
+    });
+    for (const [w, name, align] of [[w1, 'f1 ', 'right'], [w2, ' f2', 'left']] as const) {
+      const lf = Math.log10(w / TWO_PI);
+      drawPolyline(fv_, [[lf, yLo], [lf, yHi]], colors.muted, 1, [2, 4]);
+      label(fv_, name, [lf, yLo + 0.3], colors.muted, align);
+    }
+    drawPolyline(fv_, clip(lowAs).filter(([, y]) => y > yLo && y < yHi), colors.series[2], 1, [5, 3]);
+    drawPolyline(fv_, clip(highAs).filter(([, y]) => y > yLo && y < yHi), colors.series[3], 1, [5, 3]);
+    if (Kh > 0) drawPolyline(fv_, [[F_LO, Math.log10(Kh)], [F_HI, Math.log10(Kh)]], colors.series[1], 1, [5, 3]);
+    drawPolyline(fv_, clip(curve), colors.accent, 2.2);
+    label(fv_, '(Jm+JL)ω²', [F_LO + 0.15, Math.min(yHi - 0.4, lowAs[40][1] + 0.4)], colors.series[2]);
+
+    /* ---------------- load step ---------------- */
+    const { A, B } = system(Jm, JL, Kr, br, Kh);
+    const poles = polyRoots(num);
+    const fast = Math.max(...poles.map(cAbs));
+    const nonzero = poles.map(cAbs).filter((m) => m > 1e-6 * fast);
+    const slowW = nonzero.length < poles.length ? fast : Math.min(...nonzero);
+    const tEnd = Math.min(12 * TWO_PI / slowW, 400 * TWO_PI / fast);
+    const sub = Math.max(1, Math.ceil((tEnd / N_OUT) / (0.05 / fast)));
+    const h = tEnd / (N_OUT * sub);
+    const f = (x: number[]) => matVec(A, x).map((v, i) => v + B[i] * TL);
+    let x = [0, 0, 0, 0];
+    const lt: Array<[number, number]> = [[0, 0]], mt: Array<[number, number]> = [[0, 0]], ex: Array<[number, number]> = [[0, 0]];
+    // One step of the exact solution, reused: z(t+H) = expm(M H) z(t).
+    const M = [...A.map((row, i) => [...row, B[i]]), [0, 0, 0, 0, 0]];
+    const Phi = expm(M.map((row) => row.map((v) => v * tEnd / N_OUT)));
+    let z = [0, 0, 0, 0, TL];
+    let maxGap = 0, lo = 0, hi = 0;
+    for (let k = 1; k <= N_OUT; k++) {
+      for (let m = 0; m < sub; m++) {
+        const a = f(x);
+        const b = f(x.map((v, j) => v + (h / 2) * a[j]));
+        const c = f(x.map((v, j) => v + (h / 2) * b[j]));
+        const d = f(x.map((v, j) => v + h * c[j]));
+        x = x.map((v, j) => v + (h / 6) * (a[j] + 2 * b[j] + 2 * c[j] + d[j]));
+      }
+      z = matVec(Phi, z);
+      const t = (k * tEnd) / N_OUT;
+      lt.push([t, x[2]]); mt.push([t, x[0]]); ex.push([t, z[2]]);
+      maxGap = Math.max(maxGap, Math.abs(z[2] - x[2]), Math.abs(z[0] - x[0]));
+      lo = Math.min(lo, x[2], x[0]); hi = Math.max(hi, x[2], x[0]);
+    }
+    const span = (hi - lo) || 1;
+    const sv = makeView(stepCanvas, { xMin: 0, xMax: tEnd, yMin: lo - 0.08 * span, yMax: hi + 0.08 * span, pad: 38 });
+    drawAxes(sv, {
+      xTicks: [tEnd / 4, tEnd / 2, (3 * tEnd) / 4, tEnd], xTickLabel: (v) => sig(v, 2),
+      yTicks: [lo, hi].filter((v) => Math.abs(v) > 0.05 * span), yTickLabel: (v) => sig(v, 2),
+      xLabel: 't [s]', yLabel: 'θ [rad]',
+    });
+    if (Kh > 0) drawPolyline(sv, [[0, -TL / Kh], [tEnd, -TL / Kh]], colors.series[1], 1, [4, 4]);
+    drawPolyline(sv, mt, colors.series[3], 1.4);
+    drawPolyline(sv, lt, colors.series[0], 4);
+    drawPolyline(sv, ex, colors.accent, 1.5);
+
+    /* ---------------- readout ---------------- */
+    const modes = poles.filter((p) => p[1] > 0 && cAbs(p) > 1e-6 * fast)
+      .sort((p1, p2) => cAbs(p1) - cAbs(p2))
+      .map((p) => `${sig(cAbs(p) / TWO_PI)} Hz, ζ = ${sig(-p[0] / cAbs(p), 2)}`);
+    const rigid = poles.filter((p) => cAbs(p) <= 1e-6 * fast).length;
+    const unstable = poles.some((p) => p[0] > 1e-9 * fast);
+    let verdict: string;
+    if (ratio === 0) {
+      verdict = 'No controller. Below f<sub>1</sub> the load torque moves both inertias together and sees J<sub>m</sub> + J<sub>L</sub>; above f<sub>2</sub> it only moves the load and sees J<sub>L</sub>. Between them the stiffness peaks where the motor side resonates on the shaft and dips where the whole chain does. With nothing holding position the static stiffness is zero, so the step accelerates both inertias away.';
+    } else if (Math.abs(ratio - 1) < 1e-9) {
+      verdict = `K̂<sub>r</sub> = K<sub>r</sub>: the motor is told to cancel the shaft’s pull, and it does — θ<sub>m</sub> barely moves. The load is left on a spring with nothing but b<sub>r</sub> to damp it, ringing at ${sig(Math.sqrt(Kr / JL) / TWO_PI)} Hz around −T<sub>L</sub>/K<sub>r</sub>. That is what blind decoupling buys here.`;
+    } else if (unstable) {
+      verdict = 'A pole is in the right half plane.';
+    } else {
+      verdict = `Partial decoupling acts like a spring of stiffness K̂<sub>r</sub> = ${sig(Kh)} N·m/rad at low frequency, where the stiffness curve now flattens. It adds stiffness, not damping: the two modes are still damped only by b<sub>r</sub>.`;
+    }
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>bare mechanism</th><td>f<sub>1</sub> = √(K<sub>r</sub>/J<sub>m</sub>)/2π = <b>${sig(w1 / TWO_PI)}</b> Hz (stiffness peak)</td>
+            <td>f<sub>2</sub> = √(K<sub>r</sub>/J<sub>∥</sub>)/2π = <b>${sig(w2 / TWO_PI)}</b> Hz (notch), J<sub>∥</sub> = ${Jpar.toExponential(2)}</td></tr>
+        <tr><th>modes with K̂<sub>r</sub></th><td colspan="2">${modes.join('; ')}${rigid ? `; ${rigid} poles at s = 0 (rigid body)` : ''}</td></tr>
+        <tr><th>static stiffness</th><td>|T<sub>L</sub>/θ<sub>L</sub>| at 0 Hz = ${ratio === 0 ? '0' : `${sig(Kh)} N·m/rad`}</td>
+            <td>${ratio === 0 ? 'nothing holds position' : `θ<sub>L</sub> settles toward −T<sub>L</sub>/K̂<sub>r</sub> = ${sig(-TL / Kh)} rad`}</td></tr>
+        <tr><th>this run</th><td>θ<sub>L</sub> from ${sig(Math.min(...lt.map(([, y]) => y)))} to ${sig(Math.max(...lt.map(([, y]) => y)))} rad</td>
+            <td>θ<sub>m</sub> from ${sig(Math.min(...mt.map(([, y]) => y)))} to ${sig(Math.max(...mt.map(([, y]) => y)))} rad</td></tr>
+        <tr><th>exact vs RK4</th>
+            <td colspan="2">${maxGap < 1e-4 * span
+              ? `max difference <b>${maxGap.toExponential(1)}</b> rad — the two agree`
+              : `max difference ${maxGap.toExponential(2)} rad`}</td></tr>
+      </table>
+      <p class="note">${verdict}</p>`;
+  }
+
+  [jmEl, jlEl, krEl, brEl, khEl].forEach((el) => el.addEventListener('input', draw));
+  root.querySelectorAll<HTMLButtonElement>('.presets button').forEach((btn) => {
+    btn.addEventListener('click', () => { khEl.value = btn.dataset.kh!; draw(); });
+  });
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

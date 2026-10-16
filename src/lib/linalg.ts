@@ -320,3 +320,103 @@ export function stepResponseResidues(
     + cMul(r2, cExp(cMul(s2, [t, 0])))[0]
   ) / k;
 }
+
+/* ---------------------------------------------------------------------------
+   Polynomials and the matrix exponential, for the Week 7 motion tools.
+
+   Those tools have third- and fourth-order loops, so the quadratic formula
+   above no longer covers the poles, and a residue expansion breaks wherever
+   two poles meet (the resonant load at Jm = JL does exactly that). The
+   matrix exponential does not care: for a linear system with a step or
+   sinusoidal input, augmenting the state with the input's own generator and
+   taking expm(M h) gives the exact solution at any step h. That is the
+   independent path each tool's RK4 trace is checked against.
+   --------------------------------------------------------------------------- */
+
+/** p(s) for real coefficients, highest power first. */
+export function polyEval(coeffs: number[], s: Cx): Cx {
+  let acc: Cx = [0, 0];
+  for (const c of coeffs) acc = cAdd(cMul(acc, s), [c, 0]);
+  return acc;
+}
+
+/**
+ * All roots of a real polynomial, highest power first, by Durand-Kerner
+ * iteration and a Newton polish on the original coefficients. Widely
+ * separated roots (a velocity loop 1000x faster than an integrator) are the
+ * normal case here, so the starting circle is scaled to the root bound.
+ */
+export function polyRoots(coeffs: number[]): Cx[] {
+  // Exact zero roots come off first: a free body has a double pole at s = 0,
+  // and polishing toward a multiple root divides by a vanishing derivative.
+  const trimmed = coeffs.slice();
+  const zeros: Cx[] = [];
+  while (trimmed.length > 1 && trimmed[trimmed.length - 1] === 0) { trimmed.pop(); zeros.push([0, 0]); }
+  if (zeros.length) return [...polyRoots(trimmed), ...zeros].sort((p, q) => q[0] - p[0] || q[1] - p[1]);
+  const lead = coeffs[0];
+  const a = coeffs.map((c) => c / lead);
+  const n = a.length - 1;
+  if (n < 1) return [];
+  const bound = 1 + Math.max(...a.slice(1).map(Math.abs));
+  let z: Cx[] = Array.from({ length: n }, (_, k) => {
+    const ang = (2 * Math.PI * k) / n + 0.4;
+    const r = bound * Math.pow(0.6, k);           // spread the radii too
+    return [r * Math.cos(ang), r * Math.sin(ang)] as Cx;
+  });
+  for (let it = 0; it < 500; it++) {
+    let moved = 0;
+    const next = z.map((zi, i) => {
+      let den: Cx = [1, 0];
+      z.forEach((zj, j) => { if (j !== i) den = cMul(den, cSub(zi, zj)); });
+      const step = cDiv(polyEval(a, zi), den);
+      moved = Math.max(moved, cAbs(step) / Math.max(cAbs(zi), 1e-300));
+      return cSub(zi, step);
+    });
+    z = next;
+    if (moved < 1e-15) break;
+  }
+  // Newton polish against the monic polynomial and its derivative.
+  const da = a.slice(0, n).map((c, k) => c * (n - k));
+  z = z.map((zi) => {
+    let r = zi;
+    for (let k = 0; k < 4; k++) {
+      const d = polyEval(da, r);
+      if (cAbs(d) === 0) break;
+      r = cSub(r, cDiv(polyEval(a, r), d));
+    }
+    // A real root carries round-off imaginary dust; drop it.
+    if (Math.abs(r[1]) < 1e-9 * Math.max(cAbs(r), 1e-300)) r = [r[0], 0];
+    return r;
+  });
+  return z.sort((p, q) => q[0] - p[0] || q[1] - p[1]);
+}
+
+export function matMul(A: number[][], B: number[][]): number[][] {
+  return A.map((row) => B[0].map((_, j) => row.reduce((s, v, k) => s + v * B[k][j], 0)));
+}
+
+export function matVec(A: number[][], x: number[]): number[] {
+  return A.map((row) => row.reduce((s, v, k) => s + v * x[k], 0));
+}
+
+/**
+ * e^M by scaling and squaring a Taylor series. Scaled until the 1-norm is
+ * below 0.5, where 20 terms are far past double precision; checked against
+ * the closed forms of a rotation and a decaying pair in verify/.
+ */
+export function expm(M: number[][]): number[][] {
+  const n = M.length;
+  const norm = Math.max(...M[0].map((_, j) => M.reduce((s, row) => s + Math.abs(row[j]), 0)));
+  const sq = Math.max(0, Math.ceil(Math.log2(norm / 0.5)));
+  const scale = Math.pow(2, -sq);
+  const A = M.map((row) => row.map((v) => v * scale));
+  const I = M.map((_, i) => M.map((__, j) => (i === j ? 1 : 0)));
+  let term = I.map((r) => r.slice());
+  let sum = I.map((r) => r.slice());
+  for (let k = 1; k <= 20; k++) {
+    term = matMul(term, A).map((row) => row.map((v) => v / k));
+    sum = sum.map((row, i) => row.map((v, j) => v + term[i][j]));
+  }
+  for (let k = 0; k < sq; k++) sum = matMul(sum, sum);
+  return n ? sum : [];
+}

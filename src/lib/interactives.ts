@@ -24,6 +24,42 @@ export const week1 = [
   },
 ];
 
+export const week7 = [
+  {
+    href: '/interactives/motion-stiffness-tuning/',
+    title: 'Tuning Motion Control by Dynamic Stiffness',
+    lecture: 'W7L1',
+    blurb: 'Active damping, active stiffness and integrated stiffness, each a straight line ' +
+           'on the log-log stiffness plot. Put each bandwidth where two lines meet, read off ' +
+           'the gains, and see how close the closed-loop poles land when the loops are a ' +
+           'decade apart, and how far when they are not.',
+  },
+  {
+    href: '/interactives/stiffness-bandwidth/',
+    title: 'Dynamic Stiffness, Bandwidth and the Bode Plot',
+    lecture: 'W7L1 + W7L2',
+    blurb: 'Drag the three gains and watch the crossings move: b_a and b_p set f_v, ' +
+           'K_sa sets f_p, K_isa sets f_ip. The same frequencies show up on Bode plots of ' +
+           'each loop and of the closed loop, and in a load step and a sine command.',
+  },
+  {
+    href: '/interactives/motion-command-paths/',
+    title: 'Motion Commands and Velocity Feedforward',
+    lecture: 'W7L1 + W7L2',
+    blurb: 'State feedback and a classical P–PI cascade with the same poles. Give the state ' +
+           'controller its velocity command, or the cascade its velocity feedforward, and the ' +
+           'two become the same controller. Leave it off and a sine command lags.',
+  },
+  {
+    href: '/interactives/resonant-load/',
+    title: 'Resonant Load: Two Inertias on a Shaft',
+    lecture: 'W7L2',
+    blurb: 'A compliant shaft puts a peak and a notch between the two inertia lines of the ' +
+           'stiffness plot. Cancel the shaft\'s pull on the motor and the load is left ringing ' +
+           'on an undamped spring.',
+  },
+];
+
 export const week6 = [
   {
     href: '/interactives/virtual-zero-reference/',
@@ -45,6 +81,15 @@ export const week6 = [
 ];
 
 export const week5 = [
+  {
+    href: '/interactives/decoupling-derivation/',
+    title: 'Deriving the Decoupling Matrix',
+    lecture: 'W5L1 · step by step',
+    blurb: 'Where the decoupling matrix comes from, in five steps you work through: ' +
+           'the two things each actuator does, those written as a matrix, the matrix ' +
+           'turned around by elimination and again by the 2 × 2 inverse recipe, and then ' +
+           'the same matrix read as summing junctions and gain blocks.',
+  },
   {
     href: '/interactives/input-decoupling/',
     title: 'Manipulated Input Decoupling',
@@ -142,6 +187,7 @@ export const week2 = [
 ];
 
 export const weeks = [
+  { week: 7, items: week7 },
   { week: 6, items: week6 },
   { week: 5, items: week5 },
   { week: 4, items: week4 },

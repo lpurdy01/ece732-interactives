@@ -236,8 +236,10 @@ async function sweepLayout(browser, origin, report, tag) {
                   '/interactives/dynamic-stiffness/', '/interactives/voltage-source-stiffness/',
                   '/interactives/eigenvalue-migration/', '/interactives/motor-transfer-matrix/',
                   '/interactives/motor-state-feedback/', '/interactives/input-decoupling/',
-                  '/interactives/disturbance-decoupling/', '/interactives/virtual-zero-reference/',
-                  '/interactives/pi-current-regulator/'];
+                  '/interactives/decoupling-derivation/', '/interactives/disturbance-decoupling/', '/interactives/virtual-zero-reference/',
+                  '/interactives/pi-current-regulator/', '/interactives/motion-stiffness-tuning/',
+                  '/interactives/motion-command-paths/', '/interactives/resonant-load/',
+                  '/interactives/stiffness-bandwidth/'];
   for (const [w, h] of [[360, 780], [768, 1024], [1440, 900]]) {
     for (const scheme of ['light', 'dark']) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: scheme });
@@ -351,6 +353,32 @@ try {
                        ['#idc-c1', '#idc-c2'], async (page, inspect) => {
       await page.uncheck('#idc-on'); await inspect('decoupling off'); await page.check('#idc-on');
     });
+    // The walkthrough hides four of its five steps until asked. The slider
+    // sweep above runs against step 1; this opens the rest and drives every
+    // candidate, both drawings and the null tests at the ends of L.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/decoupling-derivation/', [],
+                       async (page, inspect) => {
+      await page.click('#dv-all');
+      await inspect('all steps');
+      for (const len of ['1', '4']) {
+        await setRange(page, '#dv-l2', len);
+        for (const cand of ['inv', 'arm', 'sign', 'none']) {
+          await page.check(`input[name="dv-cand"][value="${cand}"]`);
+          await inspect(`L=${len} candidate ${cand}`);
+        }
+        for (const [fc, tc] of [[-12, 12], [12, -12], [0, 0]]) {
+          await setRange(page, '#dv-fc2', fc);
+          await setRange(page, '#dv-tc2', tc);
+          await page.waitForTimeout(20);
+          await inspect(`L=${len} F*=${fc} T*=${tc}`);
+        }
+        for (let b = 1; b <= 3; b++) {
+          await page.click(`#dv-null button:nth-child(${b})`);
+          await inspect(`L=${len} null test ${b}`);
+        }
+      }
+      await page.check('#dv-shared'); await inspect('shared gains'); await page.uncheck('#dv-shared');
+    });
     // Every controller, at the corners where over-decoupling goes unstable.
     await sweepSliders(browser, server.origin, report, tag, '/interactives/disturbance-decoupling/',
                        ['#did-inv', '#did-sim'], async (page, inspect) => {
@@ -374,6 +402,29 @@ try {
     });
     await sweepSliders(browser, server.origin, report, tag, '/interactives/pi-current-regulator/',
                        ['#pic-splane', '#pic-step']);
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/motion-stiffness-tuning/',
+                       ['#mst-frf', '#mst-step']);
+    // Every command path, at the corners of the bandwidths.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/motion-command-paths/',
+                       ['#mcp-frf', '#mcp-time'], async (page, inspect) => {
+      for (const path of ['sfb-w', 'sfb', 'cls', 'cls-ff']) {
+        await page.selectOption('#mcp-path', path);
+        for (const [fp, fip] of [[2, -1.3], [-0.3, 1], [-0.3, -1.3]]) {
+          await setRange(page, '#mcp-fp', fp);
+          await setRange(page, '#mcp-fip', fip);
+          await page.waitForTimeout(25);
+          await inspect(`path=${path} fp=${fp} fip=${fip}`);
+        }
+      }
+    });
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/resonant-load/',
+                       ['#rsl-frf', '#rsl-step']);
+    // Every gain at its extremes with and without omega*, in both stiffness views.
+    await sweepSliders(browser, server.origin, report, tag, '/interactives/stiffness-bandwidth/',
+                       ['#sbw-ds', '#sbw-bode', '#sbw-step', '#sbw-sine'], async (page, inspect) => {
+      await page.uncheck('#sbw-wstar'); await inspect('no omega*'); await page.check('#sbw-wstar');
+      await page.check('#sbw-flip'); await inspect('compliance'); await page.uncheck('#sbw-flip');
+    });
     await sweepLayout(browser, server.origin, report, tag);
     await browser.close();
   }

@@ -155,7 +155,7 @@ a { color: var(--accent); }
 .toggles label { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
 
 .presets { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.presets button {
+.presets button, .dv-btns button {
   font-family: inherit;
   font-size: 0.78rem;
   padding: 0.25rem 0.6rem;
@@ -165,7 +165,7 @@ a { color: var(--accent); }
   color: var(--accent);
   cursor: pointer;
 }
-.presets button:hover { border-color: var(--accent); }
+.presets button:hover, .dv-btns button:hover { border-color: var(--accent); }
 
 .hint { font-size: 0.82rem; color: var(--muted); margin: 0.5rem 0 0; }
 
@@ -526,3 +526,120 @@ a { color: var(--accent); }
 /* A part the selected case does not use stays drawn, so the picture does not
    reflow under you, but stops claiming to be part of the answer. */
 .is-off { opacity: 0.22; }
+
+/* ---------------------------------------------------------------------------
+   Deriving the decoupling matrix (DecouplingDerivation.astro)
+
+   A walkthrough rather than an explorer: five steps stacked in reading order,
+   each one revealed when the reader asks for it, so an earlier matrix is still
+   on screen to compare against when a later step uses it.
+   --------------------------------------------------------------------------- */
+.dv-step { border-top: 1px solid var(--rule); padding: 1.2rem 0 0.5rem; }
+.dv-step:first-child { border-top: none; padding-top: 0.1rem; }
+.dv-step > h3 { font-size: 1.08rem; margin: 0 0 0.5rem; line-height: 1.3; }
+.dv-kicker {
+  display: block;
+  font: 600 0.7rem/1.4 ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted);
+}
+.dv-step p { margin: 0.6rem 0; }
+.dv-step .controls { margin: 0.8rem 0 0.4rem; }
+.dv-take { border-left: 3px solid var(--accent); padding: 0.05rem 0 0.05rem 0.8rem; }
+.dv-aside { font-size: 0.85rem; color: var(--muted); }
+
+/* Display maths scrolls inside its own box on a phone instead of pushing the
+   page sideways. The padding keeps the scroll container from clipping the
+   tops of brackets and fraction bars. */
+.dv-eqs { overflow-x: auto; overflow-y: hidden; padding: 0.15rem 0; }
+.dv-eqs .katex-display { margin: 0.4rem 0; text-align: left; }
+.dv-eqs .katex-display > .katex { text-align: left; }
+
+/* A tagged entry: dotted underline says "this one answers to something", and
+   it lights with the block, the arm or the slider it belongs to. */
+.dv .katex [data-sym] { border-bottom: 1px dotted var(--muted); cursor: help; padding: 0 0.12em; }
+/* KaTeX lays a matrix out as stacked boxes, and the box that holds the depth
+   below the baseline sits on top of every row but the first. It is empty, but
+   it takes the pointer, so entries in a second row never saw a hover. Only the
+   tagged entries need the pointer at all. Caught by verify-interactives.mjs. */
+.dv .katex * { pointer-events: none; }
+.dv .katex [data-sym], .dv .katex [data-sym] * { pointer-events: auto; }
+.dv .katex [data-sym].is-hot {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-radius: 3px;
+}
+
+/* Live numbers are plain text, not typeset: they change on every drag and the
+   browser checks read them back. */
+.dv-mat {
+  display: inline-grid;
+  grid-template-columns: repeat(var(--cols, 2), auto);
+  gap: 0.15rem 0.9rem;
+  padding: 0.25rem 0.5rem;
+  border-left: 2px solid currentColor; border-right: 2px solid currentColor;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: 0.82rem;
+  font-variant-numeric: tabular-nums; text-align: right;
+  vertical-align: middle;
+}
+.dv-mat .dv-good { color: var(--good); font-weight: 700; }
+.dv-mat .dv-bad { color: var(--bad); font-weight: 700; }
+.dv-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin: 0.5rem 0;
+          font-family: ui-monospace, monospace; font-size: 0.82rem; }
+
+.dv-lines { list-style: none; margin: 0.6rem 0; padding: 0; counter-reset: dvline; }
+.dv-lines > li {
+  counter-increment: dvline;
+  display: grid; grid-template-columns: 1.6rem minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 0.1rem 0.8rem; align-items: center;
+  padding: 0.5rem 0; border-bottom: 1px dotted var(--rule);
+}
+.dv-lines > li[hidden] { display: none; }
+.dv-lines > li::before {
+  content: counter(dvline);
+  font: 600 0.72rem/1.5rem ui-sans-serif, system-ui, sans-serif;
+  width: 1.5rem; height: 1.5rem; text-align: center; border-radius: 50%;
+  border: 1px solid var(--rule); color: var(--muted);
+  grid-row: 1 / span 2; align-self: start;
+}
+.dv-why { grid-column: 2 / -1; font-size: 0.86rem; color: var(--muted); margin: 0; }
+.dv-sym { min-width: 0; }
+.dv-num { min-width: 0; font-family: ui-monospace, monospace; font-size: 0.8rem;
+          font-variant-numeric: tabular-nums; overflow-x: auto; }
+@media (max-width: 40rem) {
+  .dv-lines > li { grid-template-columns: 1.6rem minmax(0, 1fr); }
+  .dv-num, .dv-why { grid-column: 2; }
+}
+
+.dv-btns { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
+           font-family: ui-monospace, monospace; font-size: 0.82rem; }
+.dv-btns[hidden] { display: none; }
+.dv-btns button:disabled { opacity: 0.4; cursor: default; }
+.dv-nav { margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--rule); }
+.dv-nav #dv-next { border-color: var(--accent); font-weight: 600; }
+.dv-where { color: var(--muted); margin: 0 0.3rem; }
+
+.dv-box { border: 1px solid var(--rule); border-radius: 6px; padding: 0.6rem 0.8rem; margin: 0.8rem 0; }
+.dv-box > :first-child { margin-top: 0; }
+.dv-box > :last-child { margin-bottom: 0; }
+.dv-status { font-family: ui-monospace, monospace; font-size: 0.82rem; }
+.dv-status[data-state="done"], .dv-feedback[data-state="done"] { color: var(--good); }
+.dv-feedback { font-size: 0.88rem; min-height: 1.4em; }
+.dv-feedback[data-state="wrong"] { color: var(--bad); }
+
+.dv-fill { border-collapse: separate; border-spacing: 0.45rem 0.35rem; font-size: 0.9rem; }
+.dv-fill th { font-weight: 400; font-style: italic; color: var(--muted); white-space: nowrap; }
+.dv-fill tbody th { text-align: right; }
+.dv-fill select {
+  font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 0.2rem 0.3rem; min-width: 4.6rem;
+  border: 1px solid var(--rule); border-radius: 3px; background: var(--paper); color: var(--ink);
+}
+.dv-fill select.is-right { border-color: var(--good); }
+.dv-fill select.is-wrong { border-color: var(--bad); }
+
+.dv-cands { display: flex; flex-direction: column; gap: 0.25rem; margin: 0.5rem 0;
+            font-family: ui-monospace, monospace; font-size: 0.82rem; }
+.dv-cands label { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.dv-step h4 { font-size: 0.95rem; margin: 1.1rem 0 0.3rem; }
+

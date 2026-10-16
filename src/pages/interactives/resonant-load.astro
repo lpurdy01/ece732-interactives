@@ -1,0 +1,17 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/ResonantLoad.astro';
+---
+
+<BaseLayout title="Resonant Load — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Resonant Load: Two Inertias on a Shaft</h1>
+  <p class="lede">
+    A motor drives its load through a shaft that is a stiff, lightly damped
+    spring. The stiffness the load sees has a peak and a notch between the
+    two inertia lines. Then try cancelling the shaft's pull on the motor and
+    see what the load does when the motor stops helping.
+  </p>
+  <Widget />
+</BaseLayout>

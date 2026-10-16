@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/MotionCommandPaths.astro';
+---
+
+<BaseLayout title="Motion Commands and Velocity Feedforward — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Motion Commands and Velocity Feedforward</h1>
+  <p class="lede">
+    A state feedback controller and a classical P–PI cascade can be given the
+    same feedback, and then they have the same poles and the same stiffness.
+    What they do not share is the path a command takes in. Switch between the
+    four command paths and watch the tracking of a sine change while the
+    poles stay put.
+  </p>
+  <Widget />
+</BaseLayout>

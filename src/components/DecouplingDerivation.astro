@@ -1,0 +1,825 @@
+---
+// Deriving the decoupling matrix, one step at a time (W5L1).
+//
+// The other decoupling tool starts from B^-1 and asks what spoils it. This one
+// stops earlier, at the part that is easy to nod through and hard to redo:
+// where the entries of B come from, how B is turned around into B^-1, and why
+// a matrix and a block diagram are the same drawing.
+//
+//   1  two actuators, and the two things the bar gets from them
+//   2  those two sentences as two equations, then as the matrix B
+//   3  the controller's question is the other way round: solve for F1, F2
+//   4  the same answer from the 2x2 inverse recipe, and a multiply-back check
+//   5  rows are junctions, columns are inputs, entries are gains on wires
+//
+//   [F]   [ 1     1  ] [F1]          [F1]   [1/2   1/L] [F*]
+//   [T] = [L/2  -L/2 ] [F2]          [F2] = [1/2  -1/L] [T*]
+//
+// Steps are stacked and revealed in order rather than swapped, so the B of
+// step 2 is still on screen when step 4 inverts it.
+//
+// Symbolic maths is typeset once at build time. Anything with a number in it
+// is plain text written by the script, so nothing on the page shows a value
+// the page did not compute, and the browser checks can read it back. The two
+// closed forms (F1, F2 from the commands, and B^-1) are each compared against
+// Gaussian elimination on the numbers, which shares no algebra with them.
+import katex from 'katex';
+import { diagramSvg, markup } from '../lib/diagram-svg';
+import { decouplingWiring } from '../lib/figures';
+import { href } from '../lib/href';
+
+const tex = (t: string, display = true) =>
+  katex.renderToString(t, { displayMode: display, throwOnError: false, trust: true, strict: false });
+/** An entry that lights with its block, its arm or its slider: see figure-sync.ts. */
+const k = (keys: string, body: string) => `\\htmlData{sym=${keys}}{${body}}`;
+
+const B = `\\begin{bmatrix} ${k('b11', '1')} & ${k('b12', '1')} \\\\[4pt] `
+  + `${k('b21 L', '\\tfrac{L}{2}')} & ${k('b22 L', '-\\tfrac{L}{2}')} \\end{bmatrix}`;
+const M = `\\begin{bmatrix} ${k('m11 h', '\\tfrac{1}{2}')} & ${k('m12 q L', '\\tfrac{1}{L}')} \\\\[4pt] `
+  + `${k('m21 h', '\\tfrac{1}{2}')} & ${k('m22 q L', '-\\tfrac{1}{L}')} \\end{bmatrix}`;
+const col = (a: string, b: string) => `\\begin{bmatrix} ${a} \\\\[2pt] ${b} \\end{bmatrix}`;
+
+const math = {
+  force: tex(`F \\;=\\; ${k('b11', '1')}\\cdot F_1 \\;+\\; ${k('b12', '1')}\\cdot F_2`),
+  torque: tex(`T \\;=\\; ${k('b21 L', '\\tfrac{L}{2}')}\\cdot F_1 \\;+\\; ${k('b22 L', '\\left(-\\tfrac{L}{2}\\right)')}\\cdot F_2`),
+  bEq: tex(`${col('F', 'T')} \\;=\\; \\underbrace{${B}}_{B}\\; ${col('F_1', 'F_2')}`),
+  s3: [
+    tex('F^{*} = F_1 + F_2'),
+    tex('T^{*} = \\tfrac{L}{2}F_1 - \\tfrac{L}{2}F_2'),
+    tex('\\tfrac{2}{L}\\,T^{*} = F_1 - F_2'),
+    tex('F^{*} + \\tfrac{2}{L}T^{*} = 2F_1 \\;\\;\\Rightarrow\\;\\; F_1 = \\tfrac{1}{2}F^{*} + \\tfrac{1}{L}T^{*}'),
+    tex('F^{*} - \\tfrac{2}{L}T^{*} = 2F_2 \\;\\;\\Rightarrow\\;\\; F_2 = \\tfrac{1}{2}F^{*} - \\tfrac{1}{L}T^{*}'),
+    tex(`${col('F_1', 'F_2')} \\;=\\; ${M}\\; ${col('F^{*}', 'T^{*}')}`),
+  ],
+  recipe: tex('\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}^{-1} = \\frac{1}{ad - bc}'
+    + '\\begin{bmatrix} d & -b \\\\ -c & a \\end{bmatrix}'),
+  s4: [
+    tex('\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix} = \\begin{bmatrix} 1 & 1 \\\\[4pt] \\tfrac{L}{2} & -\\tfrac{L}{2} \\end{bmatrix}'),
+    tex('ad - bc = (1)\\left(-\\tfrac{L}{2}\\right) - (1)\\left(\\tfrac{L}{2}\\right) = -L'),
+    tex('\\begin{bmatrix} d & -b \\\\ -c & a \\end{bmatrix} = \\begin{bmatrix} -\\tfrac{L}{2} & -1 \\\\[4pt] -\\tfrac{L}{2} & 1 \\end{bmatrix}'),
+    tex(`B^{-1} = \\frac{1}{-L}\\begin{bmatrix} -\\tfrac{L}{2} & -1 \\\\[4pt] -\\tfrac{L}{2} & 1 \\end{bmatrix} = ${M}`),
+  ],
+  readM: tex('\\begin{array}{r|cc} & \\text{from } F^{*} & \\text{from } T^{*} \\\\ \\hline '
+    + `\\rule{0pt}{1.5em}\\text{junction that makes } F_1 & ${k('m11 h', '\\tfrac{1}{2}')} & ${k('m12 q L', '\\tfrac{1}{L}')} \\\\[5pt] `
+    + `\\text{junction that makes } F_2 & ${k('m21 h', '\\tfrac{1}{2}')} & ${k('m22 q L', '-\\tfrac{1}{L}')} \\end{array}`),
+  readB: tex('\\begin{array}{r|cc} & \\text{from } F_1 & \\text{from } F_2 \\\\ \\hline '
+    + `\\rule{0pt}{1.5em}\\text{junction that makes } F & ${k('b11', '1')} & ${k('b12', '1')} \\\\[5pt] `
+    + `\\text{junction that makes } T & ${k('b21 L', '\\tfrac{L}{2}')} & ${k('b22 L', '-\\tfrac{L}{2}')} \\end{array}`),
+  series: tex('B\\,B^{-1} = I', false),
+};
+
+/**
+ * The bar, as a skeleton. Every length in it depends on a slider, so the
+ * geometry is left empty here and written by the script; only the parts and
+ * their tags are fixed. `net` names the tags on the two results, because in
+ * step 3 they are also what the command sliders ask for.
+ */
+function barSvg(label: string, net: { F: string; T: string }): string {
+  const arrow = (key: string) => `<polyline class="fx-force" data-k="${key}"/><polygon class="fx-head" data-k="${key}h"/>`;
+  const named = (key: string, sym: string, anchor: string, x = 0, y = 0) =>
+    `<text class="fx-sym" data-k="${key}t" x="${x}" y="${y}" text-anchor="${anchor}">${markup(sym)}</text>`
+    + `<text class="fx-val" data-k="${key}v" data-val="${key.toUpperCase()}" x="${x}" y="${y + 13}" text-anchor="${anchor}"></text>`;
+  return `<svg class="fx-svg sysfig-svg" viewBox="0 0 560 256" role="img" aria-label="${label}" `
+    + `preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">`
+    + `<text class="fx-sym fx-small" x="8" y="16">+ force: up</text>`
+    + `<text class="fx-sym fx-small" x="8" y="30">+ torque: clockwise</text>`
+    + `<g data-sym="L b21"><polyline class="fx-wire" data-k="dimL"/><text class="fx-sym" data-k="armL" text-anchor="middle">L/2</text></g>`
+    + `<g data-sym="L b22"><polyline class="fx-wire" data-k="dimR"/><text class="fx-sym" data-k="armR" text-anchor="middle">L/2</text></g>`
+    + `<g data-sym="L"><polyline class="fx-wire" data-k="tickL"/><polyline class="fx-wire" data-k="tickC"/>`
+    + `<polyline class="fx-wire" data-k="tickR"/><text class="fx-val" data-val="L" x="280" y="248" text-anchor="middle"></text></g>`
+    + `<rect class="fx-face" data-k="bar" x="0" y="107" width="0" height="22"/>`
+    + `<g data-sym="F1">${arrow('f1')}${named('f1', 'F_{1}', 'end')}</g>`
+    + `<g data-sym="F2">${arrow('f2')}${named('f2', 'F_{2}', 'start')}</g>`
+    + `<g data-sym="${net.T}"><path class="fx-arc" data-k="arc"/><polygon class="fx-head" data-k="arch"/>${named('t', 'T', 'start', 326, 88)}</g>`
+    + `<g data-sym="${net.F}">${arrow('f')}${named('f', 'F', 'end', 268, 56)}</g>`
+    + `<circle class="fx-node" cx="280" cy="118" r="3.4"/>`
+    + `</svg>`;
+}
+
+const bar1 = barSvg('A bar pushed up by one actuator near each end', { F: 'F', T: 'T' });
+const bar2 = barSvg('The same bar, with the two actuator forces set by the controller', { F: 'F Fc', T: 'T Tc' });
+const wiring = (shared: boolean) => {
+  const fig = decouplingWiring(shared);
+  return diagramSvg(fig, { regions: false, className: 'sysfig-svg', ariaLabel: fig.title });
+};
+
+const ENTRIES = ['', '1', '-1', '0', '1/2', 'L/2', '-L/2', '1/L', '-1/L'];
+const show = (v: string) => (v ? v.replace('-', '−') : '?');
+const other = href('/interactives/input-decoupling/');
+---
+
+<div class="interactive dv" id="dv">
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="dv-step" data-step="1" id="step-1">
+    <h3><span class="dv-kicker">Step 1 of 5</span>Each actuator does two things</h3>
+    <p>
+      A rigid bar with one actuator near each end, a distance <i>L</i> apart. Each one
+      pushes straight up on the bar with its own force: <i>F</i><sub>1</sub> on the left,
+      <i>F</i><sub>2</sub> on the right. Two things matter about the result: the net
+      force <i>F</i> on the bar, and the net torque <i>T</i> about its centre.
+    </p>
+
+    <div class="sysfig">
+      <figure class="sysfig-panel">
+        <h3 class="sysfig-title">the bar</h3>
+        <div class="sysfig-art" id="dv-bar1" set:html={bar1} />
+        <figcaption>
+          Arrow lengths follow the sliders. The torque arc stops growing at three quarters
+          of a turn; the number beside it is exact.
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="controls">
+      <div class="param-grid">
+        <label class="slider" data-sym="L">L
+          <input type="range" id="dv-l" min="1" max="4" step="0.05" value="2" />
+          <output id="dv-l-v">2.00</output> m</label>
+        <label class="slider" data-sym="F1"><span>F<sub>1</sub></span>
+          <input type="range" id="dv-f1" min="-10" max="10" step="0.1" value="6" />
+          <output id="dv-f1-v">6.0</output> N</label>
+        <label class="slider" data-sym="F2"><span>F<sub>2</sub></span>
+          <input type="range" id="dv-f2" min="-10" max="10" step="0.1" value="2" />
+          <output id="dv-f2-v">2.0</output> N</label>
+      </div>
+    </div>
+
+    <div class="readout" id="dv-r1"></div>
+
+    <p>
+      Forces simply add. A torque is a force times its distance from the centre, and each
+      actuator sits <i>L</i>/2 out. An upward push on the left end turns the bar clockwise,
+      which is the positive direction here; the same push on the right end turns it the
+      other way, so it comes in with a minus sign.
+    </p>
+    <p class="dv-take">
+      Move only <i>F</i><sub>1</sub> and both numbers change. Neither actuator is the
+      force one or the torque one. That is the coupling.
+    </p>
+
+    <div class="dv-box">
+      <p><b>Try it by hand.</b> Set the two forces so the bar gets
+        <i>F</i> = 6 N and <i>T</i> = 3 N·m.</p>
+      <p class="dv-status" id="dv-ch" role="status"></p>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="dv-step" data-step="2" id="step-2" hidden>
+    <h3><span class="dv-kicker">Step 2 of 5</span>Two equations, written as one matrix</h3>
+    <p>
+      The two lines of that readout are the whole model. Here they are again with every
+      coefficient written out, including the ones that are just 1:
+    </p>
+    <div class="dv-eqs" set:html={math.force + math.torque} />
+    <p>
+      Now stack them. Each <b>row</b> is one equation, so one thing the bar gets. Each
+      <b>column</b> belongs to one actuator. The entry where a row meets a column is how
+      much of that row's result one newton from that column's actuator produces.
+    </p>
+
+    <div class="dv-box">
+      <p><b>Fill in the four entries</b>, reading them off the two equations above.</p>
+      <table class="dv-fill">
+        <thead><tr><th></th><th>× F<sub>1</sub></th><th>× F<sub>2</sub></th></tr></thead>
+        <tbody>
+          <tr><th>F =</th>
+            <td><select data-cell="b11" aria-label="row F, column F1">{ENTRIES.map((v) => <option value={v}>{show(v)}</option>)}</select></td>
+            <td><select data-cell="b12" aria-label="row F, column F2">{ENTRIES.map((v) => <option value={v}>{show(v)}</option>)}</select></td></tr>
+          <tr><th>T =</th>
+            <td><select data-cell="b21" aria-label="row T, column F1">{ENTRIES.map((v) => <option value={v}>{show(v)}</option>)}</select></td>
+            <td><select data-cell="b22" aria-label="row T, column F2">{ENTRIES.map((v) => <option value={v}>{show(v)}</option>)}</select></td></tr>
+        </tbody>
+      </table>
+      <div class="dv-btns">
+        <button type="button" id="dv-check">check</button>
+        <button type="button" id="dv-reveal">show me</button>
+      </div>
+      <p class="dv-feedback" id="dv-fb" role="status"></p>
+    </div>
+
+    <div id="dv-after2" hidden>
+      <div class="dv-eqs" set:html={math.bEq} />
+      <div class="dv-row" id="dv-n2"></div>
+      <p>
+        Hover an entry and the term it came from lights up, in the equations above and on
+        the bar in step 1. Read a column top to bottom and you have everything one actuator
+        does: one newton from actuator 1 is one newton of force <em>and</em>
+        <i>L</i>/2 newton-metres of torque.
+      </p>
+      <p class="dv-take">
+        Both columns have two non-zero entries. In a matrix, that is what coupled looks like.
+      </p>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="dv-step" data-step="3" id="step-3" hidden>
+    <h3><span class="dv-kicker">Step 3 of 5</span>Turn the question around</h3>
+    <p>
+      <i>B</i> answers: “I push with <i>F</i><sub>1</sub> and <i>F</i><sub>2</sub>; what does
+      the bar get?” A controller has the opposite question. It knows what it wants the bar
+      to get, a force <i>F</i>* and a torque <i>T</i>* (the star marks a command), and it has
+      to decide what to ask of each actuator. Same two equations, solved for the other two
+      letters.
+    </p>
+
+    <div class="controls">
+      <div class="param-grid">
+        <label class="slider" data-sym="Fc">F*
+          <input type="range" id="dv-fc" min="-12" max="12" step="0.5" value="8" />
+          <output id="dv-fc-v">8.0</output> N</label>
+        <label class="slider" data-sym="Tc">T*
+          <input type="range" id="dv-tc" min="-12" max="12" step="0.5" value="4" />
+          <output id="dv-tc-v">4.0</output> N·m</label>
+      </div>
+    </div>
+
+    <div class="sysfig">
+      <figure class="sysfig-panel">
+        <h3 class="sysfig-title">what the answer has to look like</h3>
+        <div class="sysfig-art" id="dv-bar2" set:html={bar2} />
+        <figcaption>
+          The two actuator forces that give the bar exactly the commanded force and torque,
+          for the numbers on the sliders. The lines below are how to find them.
+        </figcaption>
+      </figure>
+    </div>
+
+    <ol class="dv-lines" id="dv-l3">
+      <li><div class="dv-sym dv-eqs" set:html={math.s3[0]} /><div class="dv-num" data-n="1"></div>
+        <p class="dv-why">The bar has to get the commanded force.</p></li>
+      <li><div class="dv-sym dv-eqs" set:html={math.s3[1]} /><div class="dv-num" data-n="2"></div>
+        <p class="dv-why">And the commanded torque. Two equations, two unknowns.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s3[2]} /><div class="dv-num" data-n="3"></div>
+        <p class="dv-why">Divide the torque line by the arm, <i>L</i>/2. Now both lines are in
+          newtons, and both have a plain <i>F</i><sub>1</sub> and <i>F</i><sub>2</sub> in them.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s3[3]} /><div class="dv-num" data-n="4"></div>
+        <p class="dv-why">Add line 3 to line 1. <i>F</i><sub>2</sub> cancels, and what is left
+          has only <i>F</i><sub>1</sub> in it.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s3[4]} /><div class="dv-num" data-n="5"></div>
+        <p class="dv-why">Subtract line 3 from line 1 instead. This time <i>F</i><sub>1</sub> cancels.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s3[5]} /><div class="dv-num" data-n="6"></div>
+        <p class="dv-why">Line the coefficients up as in step 2: one row per actuator, one
+          column per command.</p></li>
+    </ol>
+    <div class="dv-btns" id="dv-more3">
+      <button type="button" data-lines="dv-l3">next line</button>
+    </div>
+
+    <div id="dv-after3" hidden>
+      <div class="readout" id="dv-r3"></div>
+      <p class="dv-take">
+        That matrix, placed in the controller, is the decoupling. Nothing is subtracted
+        from the bar and nothing is fed back: the controller asks the actuators for the
+        one combination that the geometry will turn back into <i>F</i>* and <i>T</i>*.
+      </p>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="dv-step" data-step="4" id="step-4" hidden>
+    <h3><span class="dv-kicker">Step 4 of 5</span>The same answer as a matrix inverse</h3>
+    <p>
+      Solving a set of equations for the other unknowns is what inverting a matrix means,
+      so the matrix at the end of step 3 is <i>B</i><sup>−1</sup>. For a 2 × 2 there is a
+      recipe that gets there without the elimination: swap the two entries on the
+      diagonal, flip the sign of the other two, and divide everything by the determinant.
+    </p>
+    <div class="dv-eqs" set:html={math.recipe} />
+
+    <div class="controls">
+      <div class="param-grid">
+        <label class="slider" data-sym="L">L
+          <input type="range" id="dv-l2" min="1" max="4" step="0.05" value="2" />
+          <output id="dv-l2-v">2.00</output> m</label>
+      </div>
+    </div>
+
+    <ol class="dv-lines" id="dv-l4">
+      <li><div class="dv-sym dv-eqs" set:html={math.s4[0]} /><div class="dv-num" data-n="1"></div>
+        <p class="dv-why">Name the four entries of <i>B</i>.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s4[1]} /><div class="dv-num" data-n="2"></div>
+        <p class="dv-why">The determinant: the product down the diagonal, minus the product
+          up the other one.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s4[2]} /><div class="dv-num" data-n="3"></div>
+        <p class="dv-why">Swap <i>a</i> and <i>d</i>; flip the signs of <i>b</i> and <i>c</i>.</p></li>
+      <li hidden><div class="dv-sym dv-eqs" set:html={math.s4[3]} /><div class="dv-num" data-n="4"></div>
+        <p class="dv-why">Divide every entry by −<i>L</i>. The same matrix as step 3, by a
+          different route.</p></li>
+    </ol>
+    <div class="dv-btns" id="dv-more4">
+      <button type="button" data-lines="dv-l4">next line</button>
+    </div>
+
+    <div id="dv-after4" hidden>
+      <p class="dv-aside">
+        The determinant is −<i>L</i>, so the recipe breaks only at <i>L</i> = 0: two actuators
+        on the same spot can push the bar but cannot turn it, and no amount of algebra in
+        the controller gets a torque out of them.
+      </p>
+
+      <h4>Check it by multiplying back</h4>
+      <p>
+        Whatever the controller does to the commands, the bar then does <i>B</i> to the
+        result. So multiply <i>B</i> by a candidate and see what the commands turn into.
+        If the candidate really is the inverse, they come out untouched.
+      </p>
+      <div class="dv-cands" role="radiogroup" aria-label="Candidate for the controller matrix">
+        <label><input type="radio" name="dv-cand" value="inv" checked /> the matrix from steps 3 and 4</label>
+        <label><input type="radio" name="dv-cand" value="arm" /> a slip: L/2 written where 1/L belongs</label>
+        <label><input type="radio" name="dv-cand" value="sign" /> a slip: the minus sign left off</label>
+        <label><input type="radio" name="dv-cand" value="none" /> no decoupling: each command goes straight to an actuator</label>
+      </div>
+      <div class="dv-row" id="dv-prod"></div>
+      <div class="readout" id="dv-r4"></div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------------------ -->
+  <section class="dv-step" data-step="5" id="step-5" hidden>
+    <h3><span class="dv-kicker">Step 5 of 5</span>From the matrix to the block diagram</h3>
+    <p>
+      A matrix is a wiring diagram written compactly. Each <b>row</b> is a summing junction,
+      because a row adds things up to make one result. Each <b>column</b> is an input. The
+      entry in a row and a column is a gain block on the wire from that input to that
+      junction, and a negative entry is a minus sign where the wire arrives.
+    </p>
+    <p>The controller's matrix, <i>B</i><sup>−1</sup>, read that way:</p>
+    <div class="dv-eqs" set:html={math.readM} />
+    <p>And the bar's own matrix, <i>B</i>:</p>
+    <div class="dv-eqs" set:html={math.readB} />
+
+    <div class="controls">
+      <div class="param-grid">
+        <label class="slider" data-sym="Fc">F*
+          <input type="range" id="dv-fc2" min="-12" max="12" step="0.5" value="8" />
+          <output id="dv-fc2-v">8.0</output> N</label>
+        <label class="slider" data-sym="Tc">T*
+          <input type="range" id="dv-tc2" min="-12" max="12" step="0.5" value="4" />
+          <output id="dv-tc2-v">4.0</output> N·m</label>
+      </div>
+      <div class="toggles">
+        <label><input type="checkbox" id="dv-shared" /> compute each equal gain once and tap it</label>
+      </div>
+      <div class="dv-btns" id="dv-null">
+        <button type="button" data-fc="8" data-tc="0">only a force command</button>
+        <button type="button" data-fc="0" data-tc="4">only a torque command</button>
+        <button type="button" data-fc="8" data-tc="4">both</button>
+      </div>
+    </div>
+
+    <div class="sysfig" id="dv-fig-full">
+      <figure class="sysfig-panel">
+        <h3 class="sysfig-title">one block per entry</h3>
+        <div class="sysfig-art" set:html={wiring(false)} />
+        <figcaption>
+          Hover an entry of either table and its block lights up. An entry of 1 is a plain
+          wire. Wires that cross without a dot are not connected. The actuators are taken
+          as ideal here: each delivers exactly the force it is asked for.
+        </figcaption>
+      </figure>
+    </div>
+    <div class="sysfig" id="dv-fig-shared" hidden>
+      <figure class="sysfig-panel">
+        <h3 class="sysfig-title">the same wiring, equal gains shared</h3>
+        <div class="sysfig-art" set:html={wiring(true)} />
+        <figcaption>
+          Both junctions use ½<i>F</i>*, so it is computed once and tapped; the same for
+          <i>T</i>*/<i>L</i>. Two blocks now stand for four entries. Nothing about the signals
+          has changed, which the numbers on the wires show.
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="readout" id="dv-r5"></div>
+
+    <p class="dv-take">
+      The controller's <i>B</i><sup>−1</sup> and the bar's own <i>B</i> sit one after the
+      other, so what the commands see is the product, <span set:html={math.series} />, the
+      identity. The coupling in the bar is still there. The controller mixes the commands first, in
+      exactly the way the bar will un-mix them.
+    </p>
+    <p class="dv-aside">
+      All of this assumes the controller knows <i>L</i> and that both actuators respond
+      equally fast. What goes wrong when either is not true is
+      <a href={other}>the other decoupling tool</a>.
+    </p>
+  </section>
+
+  <div class="dv-nav dv-btns">
+    <button type="button" id="dv-prev">← back</button>
+    <button type="button" id="dv-next">next step →</button>
+    <span class="dv-where" id="dv-where" aria-live="polite">step 1 of 5</span>
+    <button type="button" id="dv-all">show all steps</button>
+  </div>
+</div>
+
+<script>
+  import { solve } from '../lib/linalg';
+  import { bindFigureHighlight, setFigureValues } from '../lib/figure-sync';
+
+  const root = document.getElementById('dv')!;
+  const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+  const all = <T extends Element>(sel: string) => Array.from(root.querySelectorAll<T>(sel));
+
+  type Pt = [number, number];
+  type M2 = [[number, number], [number, number]];
+  const STEPS = 5;
+
+  /* ---- formatting: plain text, so the browser checks can read it back ---- */
+
+  /** Three decimals at most, no trailing zeros, a real minus sign, never −0. */
+  const fmt = (x: number) => {
+    if (!isFinite(x)) return '—';
+    const r = Math.round(x * 1000) / 1000;
+    return r === 0 ? '0' : String(r).replace('-', '−');
+  };
+  /** A negative number inside a product or a sum needs its own brackets. */
+  const par = (x: number) => (Math.round(x * 1000) < 0 ? `(${fmt(x)})` : fmt(x));
+  const agree = (gap: number) => (gap < 1e-9
+    ? `max difference <b>${gap.toExponential(1)}</b> — the two agree`
+    : `max difference ${gap.toExponential(2)}`);
+
+  const mat = (rows: Array<Array<number | string>>, cls: (r: number, c: number) => string = () => '') =>
+    `<span class="dv-mat" style="--cols:${rows[0].length}">${rows.map((row, r) => row.map((v, c) =>
+      `<span class="${cls(r, c)}">${typeof v === 'number' ? fmt(v) : v}</span>`).join('')).join('')}</span>`;
+
+  const mul = (a: M2, b: M2): M2 => [
+    [a[0][0] * b[0][0] + a[0][1] * b[1][0], a[0][0] * b[0][1] + a[0][1] * b[1][1]],
+    [a[1][0] * b[0][0] + a[1][1] * b[1][0], a[1][0] * b[0][1] + a[1][1] * b[1][1]],
+  ];
+
+  /* ---- the bar ---- */
+
+  function arrow(svg: Element, key: string, from: Pt, to: Pt, on: boolean) {
+    const line = svg.querySelector(`[data-k="${key}"]`)!;
+    const head = svg.querySelector(`[data-k="${key}h"]`)!;
+    if (!on) { line.setAttribute('points', ''); head.setAttribute('points', ''); return; }
+    const ang = Math.atan2(to[1] - from[1], to[0] - from[0]);
+    const len = 8, half = 0.4;
+    const p = (a: number) => `${(to[0] - len * Math.cos(a)).toFixed(1)},${(to[1] - len * Math.sin(a)).toFixed(1)}`;
+    line.setAttribute('points', `${from[0].toFixed(1)},${from[1].toFixed(1)} ${to[0].toFixed(1)},${to[1].toFixed(1)}`);
+    head.setAttribute('points', `${to[0].toFixed(1)},${to[1].toFixed(1)} ${p(ang - half)} ${p(ang + half)}`);
+  }
+
+  /**
+   * Write the geometry of one bar drawing. `perNewton` is the actuator arrow
+   * scale: step 3 can ask for up to 18 N from one actuator, step 1 at most 10.
+   */
+  function drawBar(host: Element, L: number, F1: number, F2: number, perNewton: number) {
+    const svg = host.querySelector('svg')!;
+    const set = (key: string, attrs: Record<string, string | number>) => {
+      const el = svg.querySelector(`[data-k="${key}"]`)!;
+      for (const [a, v] of Object.entries(attrs)) el.setAttribute(a, typeof v === 'number' ? v.toFixed(1) : v);
+    };
+    const cx = 280, cy = 118, half = 40 * L;       // 80 drawing units per metre
+    const x1 = cx - half, x2 = cx + half;
+    const F = F1 + F2, T = (L / 2) * F1 - (L / 2) * F2;
+
+    set('bar', { x: x1 - 22, width: 2 * half + 44 });
+
+    const yD = 226;
+    set('dimL', { points: `${x1},${yD} ${cx},${yD}` });
+    set('dimR', { points: `${cx},${yD} ${x2},${yD}` });
+    for (const [key, x] of [['tickL', x1], ['tickC', cx], ['tickR', x2]] as const) {
+      set(key, { points: `${x},${yD - 6} ${x},${yD + 6}` });
+    }
+    set('armL', { x: (x1 + cx) / 2, y: yD - 8 });
+    set('armR', { x: (cx + x2) / 2, y: yD - 8 });
+
+    // Actuators push on the underside. A negative force is the same arrow
+    // turned round, still below the bar, so the picture does not jump.
+    const y0 = cy + 15;
+    for (const [key, x, f, side] of [['f1', x1, F1, -1], ['f2', x2, F2, 1]] as const) {
+      const len = Math.max(10, perNewton * Math.abs(f));
+      const tail: Pt = [x, y0 + len], tip: Pt = [x, y0];
+      arrow(svg, key, f > 0 ? tail : tip, f > 0 ? tip : tail, Math.abs(f) > 1e-9);
+      set(`${key}t`, { x: x + side * 10, y: y0 + 30 });
+      set(`${key}v`, { x: x + side * 10, y: y0 + 43 });
+    }
+
+    // Net force, above the centre.
+    const yT = cy - 15, lenF = Math.max(10, 3.1 * Math.abs(F));
+    const low: Pt = [cx, yT], high: Pt = [cx, yT - lenF];
+    arrow(svg, 'f', F > 0 ? low : high, F > 0 ? high : low, Math.abs(F) > 1e-9);
+
+    // Net torque: an arc from the upper right going clockwise when positive,
+    // from the upper left going the other way when negative. The gap between
+    // the two starting points is where the net force arrow lives.
+    const arc = svg.querySelector('[data-k="arc"]')!;
+    const head = svg.querySelector('[data-k="arch"]')!;
+    if (Math.abs(T) < 1e-9) {
+      arc.setAttribute('d', ''); head.setAttribute('points', '');
+    } else {
+      const r = 26, dir = T > 0 ? 1 : -1;
+      const sweep = Math.min(270, 9 * Math.abs(T)) * (Math.PI / 180);
+      const a0 = (T > 0 ? -60 : -120) * (Math.PI / 180), a1 = a0 + dir * sweep;
+      const at = (a: number): Pt => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+      const s = at(a0), e = at(a1);
+      arc.setAttribute('d', `M ${s[0].toFixed(1)} ${s[1].toFixed(1)} A ${r} ${r} 0 `
+        + `${sweep > Math.PI ? 1 : 0} ${dir > 0 ? 1 : 0} ${e[0].toFixed(1)} ${e[1].toFixed(1)}`);
+      const tx = -dir * Math.sin(a1), ty = dir * Math.cos(a1);      // tangent at the arrow end
+      const tip: Pt = [e[0] + 3 * tx, e[1] + 3 * ty], back: Pt = [e[0] - 5 * tx, e[1] - 5 * ty];
+      const ang = Math.atan2(tip[1] - back[1], tip[0] - back[0]);
+      const p = (a: number) => `${(tip[0] - 8 * Math.cos(a)).toFixed(1)},${(tip[1] - 8 * Math.sin(a)).toFixed(1)}`;
+      head.setAttribute('points', `${tip[0].toFixed(1)},${tip[1].toFixed(1)} ${p(ang - 0.4)} ${p(ang + 0.4)}`);
+    }
+
+    setFigureValues(host, {
+      L: `L = ${L.toFixed(2)} m`,
+      F1: `${fmt(F1)} N`, F2: `${fmt(F2)} N`,
+      F: `${fmt(F)} N`, T: `${fmt(T)} N·m`,
+    });
+  }
+
+  /* ---- controls: two sliders may stand for one number ---- */
+
+  const groups: Record<string, HTMLInputElement[]> = {
+    L: [q('#dv-l'), q('#dv-l2')],
+    F1: [q('#dv-f1')],
+    F2: [q('#dv-f2')],
+    Fc: [q('#dv-fc'), q('#dv-fc2')],
+    Tc: [q('#dv-tc'), q('#dv-tc2')],
+  };
+  const digits: Record<string, number> = { L: 2, F1: 1, F2: 1, Fc: 1, Tc: 1 };
+  const value = (key: string) => parseFloat(groups[key][0].value);
+  function setValue(key: string, v: number | string) {
+    for (const el of groups[key]) {
+      el.value = String(v);
+      q<HTMLOutputElement>(`#${el.id}-v`).value = parseFloat(el.value).toFixed(digits[key]);
+    }
+  }
+
+  /* ---- step 2: the fill-in ---- */
+
+  const ANSWER: Record<string, string> = { b11: '1', b12: '1', b21: 'L/2', b22: '-L/2' };
+  const cells = all<HTMLSelectElement>('.dv-fill select');
+  const feedback = q<HTMLElement>('#dv-fb');
+
+  function fillDone(message: string) {
+    for (const c of cells) { c.value = ANSWER[c.dataset.cell!]; c.classList.add('is-right'); c.classList.remove('is-wrong'); }
+    feedback.textContent = message;
+    feedback.dataset.state = 'done';
+    q<HTMLElement>('#dv-after2').hidden = false;
+  }
+
+  function checkFill() {
+    const got: Record<string, string> = {};
+    for (const c of cells) got[c.dataset.cell!] = c.value;
+    const wrong = Object.keys(ANSWER).filter((key) => got[key] !== ANSWER[key]);
+    for (const c of cells) {
+      const ok = c.value === ANSWER[c.dataset.cell!];
+      c.classList.toggle('is-right', ok);
+      c.classList.toggle('is-wrong', !ok && c.value !== '');
+    }
+    if (!wrong.length) { fillDone('Correct. That is the matrix B.'); return; }
+
+    feedback.dataset.state = 'wrong';
+    const first = wrong[0], v = got[first];
+    if (Object.values(got).some((x) => x === '')) {
+      feedback.textContent = 'Pick an entry for every cell first.';
+    } else if (got.b11 === '1' && got.b12 === 'L/2' && got.b21 === '1' && got.b22 === '-L/2') {
+      feedback.textContent = 'Those are the right four entries with rows and columns swapped. '
+        + 'A row is one equation (F, then T); a column is one actuator (F₁, then F₂).';
+    } else if (first === 'b11' || first === 'b12') {
+      feedback.textContent = `The top row is the force equation, F = 1·F₁ + 1·F₂. `
+        + `This cell is whatever multiplies ${first === 'b11' ? 'F₁' : 'F₂'} in it.`;
+    } else if (v.includes('1/L')) {
+      feedback.textContent = '1/L is what comes out of the solving in step 3. Here the question is the '
+        + 'other way round: how much torque does one newton make? Force times its arm.';
+    } else if (first === 'b21' && v === '-L/2') {
+      feedback.textContent = 'Right size, wrong sign. Clockwise is positive, and an upward push on the '
+        + 'left end turns the bar clockwise.';
+    } else if (first === 'b22' && v === 'L/2') {
+      feedback.textContent = 'Right size, wrong sign. F₂ is on the other side of the centre, so the same '
+        + 'upward push turns the bar the other way.';
+    } else {
+      feedback.textContent = `The bottom row is the torque equation. This cell is whatever multiplies `
+        + `${first === 'b21' ? 'F₁' : 'F₂'} in T = (L/2)·F₁ − (L/2)·F₂.`;
+    }
+  }
+
+  /* ---- steps 3 and 4: one line at a time ---- */
+
+  function revealLine(listId: string, everything = false) {
+    const lines = all<HTMLLIElement>(`#${listId} > li`);
+    do {
+      const next = lines.find((li) => li.hidden);
+      if (!next) break;
+      next.hidden = false;
+    } while (everything);
+    const left = lines.filter((li) => li.hidden).length;
+    const n = listId === 'dv-l3' ? 3 : 4;
+    q<HTMLElement>(`#dv-more${n}`).hidden = left === 0;
+    q<HTMLElement>(`#dv-after${n}`).hidden = left !== 0;
+    const btn = q<HTMLButtonElement>(`#dv-more${n} button`);
+    btn.textContent = `next line (${lines.length - left + 1} of ${lines.length})`;
+  }
+
+  /* ---- everything that depends on a number ---- */
+
+  function draw() {
+    const L = value('L'), F1 = value('F1'), F2 = value('F2'), Fc = value('Fc'), Tc = value('Tc');
+    const a = L / 2;                                    // the arm
+    const B: M2 = [[1, 1], [a, -a]];
+
+    /* step 1 */
+    const F = F1 + F2, T = a * F1 - a * F2;
+    drawBar(q('#dv-bar1'), L, F1, F2, 5.5);
+    q('#dv-r1').innerHTML = `
+      <table>
+        <tr><th>net force</th><td>F = F₁ + F₂</td>
+            <td>= ${fmt(F1)} + ${par(F2)} = <b>${fmt(F)} N</b></td></tr>
+        <tr><th>net torque</th><td>T = (L/2)·F₁ − (L/2)·F₂</td>
+            <td>= ${fmt(a)} × ${par(F1)} − ${fmt(a)} × ${par(F2)} = <b>${fmt(T)} N·m</b></td></tr>
+      </table>`;
+
+    const ch = q<HTMLElement>('#dv-ch');
+    const dF = F - 6, dT = T - 3;
+    const off = (d: number, unit: string) => (Math.abs(d) <= 0.25 ? 'on target'
+      : `${fmt(Math.abs(d))} ${unit} too ${d > 0 ? 'high' : 'low'}`);
+    if (Math.abs(dF) <= 0.25 && Math.abs(dT) <= 0.25) {
+      ch.dataset.state = 'done';
+      ch.textContent = `Got it: F₁ = ${fmt(F1)} N, F₂ = ${fmt(F2)} N. You just solved two equations for `
+        + 'two unknowns by feel. The next steps do that once, for every target.';
+    } else {
+      ch.dataset.state = 'open';
+      ch.textContent = `force ${off(dF, 'N')} · torque ${off(dT, 'N·m')}`;
+    }
+
+    /* step 2 */
+    q('#dv-n2').innerHTML = `with these numbers: ${mat([[F], [T]])} = ${mat(B)} ${mat([[F1], [F2]])}`;
+
+    /* step 3: closed form, with elimination on the numbers beside it */
+    const F1c = Fc / 2 + Tc / L, F2c = Fc / 2 - Tc / L;
+    const [g1, g2] = solve(B, [Fc, Tc]);
+    const gap3 = Math.max(Math.abs(g1 - F1c), Math.abs(g2 - F2c));
+    drawBar(q('#dv-bar2'), L, F1c, F2c, 3.2);
+
+    const n3 = (n: number, html: string) => { q(`#dv-l3 [data-n="${n}"]`).innerHTML = html; };
+    const scaled = Tc / a;                              // (2/L) T*
+    n3(1, `F₁ + F₂ = ${fmt(Fc)}`);
+    n3(2, `${fmt(a)} × F₁ − ${fmt(a)} × F₂ = ${fmt(Tc)}`);
+    n3(3, `F₁ − F₂ = ${fmt(Tc)} / ${fmt(a)} = ${fmt(scaled)}`);
+    n3(4, `2F₁ = ${fmt(Fc)} + ${par(scaled)} = ${fmt(Fc + scaled)}, so F₁ = <b>${fmt(F1c)} N</b>`);
+    n3(5, `2F₂ = ${fmt(Fc)} − ${par(scaled)} = ${fmt(Fc - scaled)}, so F₂ = <b>${fmt(F2c)} N</b>`);
+    n3(6, `${mat([[F1c], [F2c]])} = ${mat([[0.5, 1 / L], [0.5, -1 / L]])} ${mat([[Fc], [Tc]])}`);
+    q('#dv-r3').innerHTML = `
+      <table>
+        <tr><th>put them back: force</th><td>F₁ + F₂ = ${fmt(F1c)} + ${par(F2c)} = <b>${fmt(F1c + F2c)} N</b></td></tr>
+        <tr><th>put them back: torque</th><td>(L/2)·(F₁ − F₂) = ${fmt(a)} × ${par(F1c - F2c)} = <b>${fmt(a * (F1c - F2c))} N·m</b></td></tr>
+        <tr><th>formula vs elimination on the numbers</th><td>${agree(gap3)}</td></tr>
+      </table>`;
+
+    /* step 4: the recipe, then multiply back */
+    const det = 1 * -a - 1 * a;
+    const inv: M2 = [[0.5, 1 / L], [0.5, -1 / L]];
+    const c1 = solve(B, [1, 0]), c2 = solve(B, [0, 1]);   // B⁻¹ a column at a time
+    const gap4 = Math.max(Math.abs(c1[0] - inv[0][0]), Math.abs(c2[0] - inv[0][1]),
+                          Math.abs(c1[1] - inv[1][0]), Math.abs(c2[1] - inv[1][1]));
+    const n4 = (n: number, html: string) => { q(`#dv-l4 [data-n="${n}"]`).innerHTML = html; };
+    n4(1, `with L = ${L.toFixed(2)} m: ${mat(B)}`);
+    n4(2, `1 × ${par(-a)} − 1 × ${fmt(a)} = <b>${fmt(det)}</b>`);
+    n4(3, mat([[-a, -1], [-a, 1]]));
+    n4(4, `each entry ÷ ${par(det)}: ${mat(inv)}`);
+
+    const cand = (root.querySelector<HTMLInputElement>('input[name="dv-cand"]:checked')?.value ?? 'inv');
+    const C: M2 = cand === 'arm' ? [[0.5, a], [0.5, -a]]
+      : cand === 'sign' ? [[0.5, 1 / L], [0.5, 1 / L]]
+      : cand === 'none' ? [[1, 0], [0, 1]]
+      : inv;
+    const P = mul(B, C);
+    const want = (r: number, c: number) => (r === c ? 1 : 0);
+    const hit = (r: number, c: number) => Math.abs(P[r][c] - want(r, c)) < 1e-9;
+    const identity = [0, 1].every((r) => [0, 1].every((c) => hit(r, c)));
+    const diagonal = Math.abs(P[0][1]) < 1e-9 && Math.abs(P[1][0]) < 1e-9;
+    q('#dv-prod').innerHTML = `B × candidate: ${mat(B)} × ${mat(C)} = `
+      + mat(P, (r, c) => (hit(r, c) ? 'dv-good' : 'dv-bad'));
+
+    let verdict: string;
+    if (cand === 'none') {
+      verdict = 'The result is just <b>B</b> again. Without decoupling the two commands are actuator '
+        + 'commands, and each one moves both the force and the torque.';
+    } else if (identity) {
+      verdict = '<b>Identity.</b> F* reaches only F and T* reaches only T, each of them one for one.';
+    } else if (diagonal) {
+      verdict = `<b>Diagonal, but not identity.</b> Nothing leaks from one command to the other, yet T* `
+        + `arrives multiplied by ${fmt(P[1][1])}. With L/2 in the second column the torque gain is L²/2 `
+        + `rather than 1. It is only right at L = √2 m, which is how a slip like this hides when a `
+        + `number is plugged in for L too early.`;
+    } else {
+      verdict = `<b>Not diagonal.</b> A torque command now pushes the bar, ${fmt(P[0][1])} N for every N·m, `
+        + `and makes ${fmt(P[1][1])} torque. Without the minus sign both actuators push the same way.`;
+    }
+    const term = (r: number, c: number) =>
+      `${par(B[r][0])} × ${par(C[0][c])} + ${par(B[r][1])} × ${par(C[1][c])} = <b>${fmt(P[r][c])}</b>`;
+    q('#dv-r4').innerHTML = `
+      <table>
+        <tr><th>row 1 of B · column 1</th><td>${term(0, 0)}</td></tr>
+        <tr><th>row 1 of B · column 2</th><td>${term(0, 1)}</td></tr>
+        <tr><th>row 2 of B · column 1</th><td>${term(1, 0)}</td></tr>
+        <tr><th>row 2 of B · column 2</th><td>${term(1, 1)}</td></tr>
+        <tr><th>recipe vs elimination on the numbers</th><td>${agree(gap4)}</td></tr>
+      </table>
+      <p class="note" id="dv-verdict">${verdict}</p>`;
+
+    /* step 5: the same numbers, on the wires */
+    const hF = Fc / 2, qT = Tc / L;
+    const Fout = F1c + F2c, Tout = a * F1c - a * F2c;     // through B, not assumed
+    setFigureValues(q('#step-5'), {
+      Fc: `${fmt(Fc)} N`, Tc: `${fmt(Tc)} N·m`,
+      w11: `${fmt(hF)} N`, w21: `${fmt(hF)} N`, w12: `${fmt(qT)} N`, w22: `${fmt(qT)} N`,
+      F1: `${fmt(F1c)} N`, F2: `${fmt(F2c)} N`,
+      wb21: `${fmt(a * F1c)} N·m`, wb22: `${fmt(a * F2c)} N·m`,
+      F: `${fmt(Fout)} N`, T: `${fmt(Tout)} N·m`,
+    });
+
+    let null5: string;
+    if (Fc === 0 && Tc === 0) {
+      null5 = 'Nothing is commanded, so nothing is asked of either actuator.';
+    } else if (Tc === 0) {
+      null5 = `<b>A force command alone.</b> Both actuators are asked for the same ${fmt(hF)} N, their `
+        + `torques cancel, and T stays at ${fmt(Tout)} N·m.`;
+    } else if (Fc === 0) {
+      null5 = `<b>A torque command alone.</b> The actuators are asked for equal and opposite forces, `
+        + `${fmt(F1c)} N and ${fmt(F2c)} N, so they turn the bar and F stays at ${fmt(Fout)} N.`;
+    } else {
+      null5 = 'Each command arrives at its own result, and only there: F = F* and T = T*.';
+    }
+    q('#dv-r5').innerHTML = `
+      <table>
+        <tr><th>upper junction</th><td>F₁ = ½F* + T*/L = ${fmt(hF)} + ${par(qT)} = <b>${fmt(F1c)} N</b></td></tr>
+        <tr><th>lower junction</th><td>F₂ = ½F* − T*/L = ${fmt(hF)} − ${par(qT)} = <b>${fmt(F2c)} N</b></td></tr>
+        <tr><th>the bar adds them</th><td>F = F₁ + F₂ = <b>${fmt(Fout)} N</b></td></tr>
+        <tr><th>and takes moments</th><td>T = (L/2)·F₁ − (L/2)·F₂ = ${fmt(a * F1c)} − ${par(a * F2c)} = <b>${fmt(Tout)} N·m</b></td></tr>
+      </table>
+      <p class="note" id="dv-null5">${null5}</p>`;
+  }
+
+  /* ---- the stepper ---- */
+
+  let step = 1;
+  function showStep(n: number, scroll = false) {
+    step = Math.max(1, Math.min(STEPS, n));
+    for (const s of all<HTMLElement>('.dv-step')) s.hidden = Number(s.dataset.step) > step;
+    q<HTMLButtonElement>('#dv-prev').disabled = step === 1;
+    q<HTMLButtonElement>('#dv-next').disabled = step === STEPS;
+    q<HTMLButtonElement>('#dv-all').disabled = step === STEPS;
+    q('#dv-where').textContent = step === STEPS ? 'all 5 steps shown' : `step ${step} of ${STEPS}`;
+    if (scroll) q<HTMLElement>(`#step-${step}`).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function showEverything() {
+    showStep(STEPS);
+    if (q<HTMLElement>('#dv-after2').hidden) fillDone('Shown: this is the matrix B.');
+    revealLine('dv-l3', true);
+    revealLine('dv-l4', true);
+  }
+
+  /* ---- wiring ---- */
+
+  for (const [key, els] of Object.entries(groups)) {
+    for (const el of els) el.addEventListener('input', () => { setValue(key, el.value); draw(); });
+    setValue(key, els[0].value);
+  }
+  q('#dv-check').addEventListener('click', checkFill);
+  q('#dv-reveal').addEventListener('click', () => fillDone('Shown: this is the matrix B.'));
+  for (const c of cells) c.addEventListener('change', () => { feedback.textContent = ''; c.classList.remove('is-wrong', 'is-right'); });
+  for (const btn of all<HTMLButtonElement>('button[data-lines]')) {
+    btn.addEventListener('click', () => revealLine(btn.dataset.lines!));
+  }
+  for (const r of all<HTMLInputElement>('input[name="dv-cand"]')) r.addEventListener('change', draw);
+  for (const btn of all<HTMLButtonElement>('#dv-null button')) {
+    btn.addEventListener('click', () => { setValue('Fc', btn.dataset.fc!); setValue('Tc', btn.dataset.tc!); draw(); });
+  }
+  q<HTMLInputElement>('#dv-shared').addEventListener('change', (e) => {
+    const shared = (e.target as HTMLInputElement).checked;
+    q<HTMLElement>('#dv-fig-full').hidden = shared;
+    q<HTMLElement>('#dv-fig-shared').hidden = !shared;
+  });
+  q('#dv-prev').addEventListener('click', () => showStep(step - 1, true));
+  q('#dv-next').addEventListener('click', () => showStep(step + 1, true));
+  q('#dv-all').addEventListener('click', showEverything);
+
+  // Deep links: #step-3 opens the walkthrough up to step 3, #all opens it all.
+  const fromHash = () => {
+    const m = location.hash.match(/^#step-([1-5])$/);
+    if (location.hash === '#all') showEverything();
+    else if (m) showStep(Number(m[1]));
+  };
+  window.addEventListener('hashchange', fromHash);
+
+  // Set the two button labels without revealing anything.
+  for (const [id, n] of [['dv-l3', 3], ['dv-l4', 4]] as const) {
+    const lines = all<HTMLLIElement>(`#${id} > li`);
+    q<HTMLButtonElement>(`#dv-more${n} button`).textContent =
+      `next line (${lines.filter((li) => !li.hidden).length + 1} of ${lines.length})`;
+  }
+
+  bindFigureHighlight(root);
+  showStep(1);
+  fromHash();
+  draw();
+</script>

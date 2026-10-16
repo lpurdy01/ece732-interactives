@@ -1,0 +1,309 @@
+---
+// Motion commands: the state feedback controller against the classical
+// cascade (W7L1 slides 26-28, W7L2 slides 19-21).
+//
+// Both controllers can be given the same feedback path. With
+//
+//   K_pv = b_a,   K_pp K_pv + K_iv = K_sa,   K_pp K_iv = K_isa
+//
+// they have the same characteristic polynomial
+//
+//   D(s) = J s^3 + (b_p + b_a) s^2 + K_sa s + K_isa,
+//
+// so the same eigenvalues and the same dynamic stiffness. What differs is the
+// command path, i.e. the numerator of theta/theta*:
+//
+//   state feedback, theta* and omega* = s theta*   b_a s^2 + K_sa s + K_isa
+//   state feedback, theta* only                    K_sa s + K_isa
+//   classical, no velocity feedforward             K_pp (b_a s + K_iv)
+//   classical, velocity feedforward s theta*       b_a s^2 + K_sa s + K_isa
+//
+// The last line equals the first: velocity feedforward is the classical name
+// for giving the state controller its omega*. The tool draws all of them on
+// one frequency plot, and runs the selected one on a sine command: RK4 on the
+// block diagram's own states, over the transfer function's exact response
+// (partial fractions at the poles plus the sinusoidal steady state).
+import SystemFigures from './SystemFigures.astro';
+import { sfbCommandFigures, classicalCommandFigures } from '../lib/figures';
+---
+
+<div class="interactive" id="mcp">
+  <SystemFigures {...sfbCommandFigures} id="mcp-fig-sfb" />
+  <SystemFigures {...classicalCommandFigures} id="mcp-fig-cls" hidden />
+
+  <div class="controls">
+    <label class="slider">command path
+      <select id="mcp-path">
+        <option value="sfb-w">state feedback, θ* and ω*</option>
+        <option value="sfb">state feedback, θ* only</option>
+        <option value="cls">classical cascade, no velocity feedforward</option>
+        <option value="cls-ff">classical cascade with velocity feedforward</option>
+      </select>
+    </label>
+    <div class="param-grid">
+      <label class="slider" data-sym="fc">command f<sub>c</sub>
+        <input type="range" id="mcp-fc" min="-1" max="2.3" step="0.001" value="1" />
+        <output id="mcp-fc-v">10</output> Hz</label>
+      <label class="slider" data-sym="fv">velocity loop f<sub>v</sub>
+        <input type="range" id="mcp-fv" min="1" max="2.7" step="0.001" value="2" />
+        <output id="mcp-fv-v">100</output> Hz</label>
+      <label class="slider" data-sym="fp">position loop f<sub>p</sub>
+        <input type="range" id="mcp-fp" min="-0.3" max="2" step="0.001" value="0.699" />
+        <output id="mcp-fp-v">5</output> Hz</label>
+      <label class="slider" data-sym="fip">integrated position f<sub>ip</sub>
+        <input type="range" id="mcp-fip" min="-1.3" max="1" step="0.001" value="-1" />
+        <output id="mcp-fip-v">0.1</output> Hz</label>
+    </div>
+  </div>
+
+  <div class="dual-canvas">
+    <figure>
+      <canvas id="mcp-frf" role="img" aria-label="Magnitude of theta over theta-star against frequency for each command path"></canvas>
+      <figcaption>|θ/θ*| for each command path, log-log; the selected path is drawn heavy</figcaption>
+    </figure>
+    <figure>
+      <canvas id="mcp-time" role="img" aria-label="Commanded and measured angle over three command periods, after the start-up has settled"></canvas>
+      <figcaption>θ* (thin) and θ, three periods once the start-up has died away</figcaption>
+    </figure>
+  </div>
+
+  <div class="readout" id="mcp-readout"></div>
+</div>
+
+<script>
+  import { type Cx, cAbs, cAdd, cSub, cMul, cDiv, cExp, polyEval, polyRoots } from '../lib/linalg';
+  import { makeView, drawAxes, drawPolyline, label, themeColors, decades, decadeLabel } from '../lib/plot';
+  import { bindFigureHighlight, setFigureValues, setFigureActive } from '../lib/figure-sync';
+
+  const root = document.getElementById('mcp')!;
+  const q = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+  const pathEl = q<HTMLSelectElement>('#mcp-path');
+  const fcEl = q<HTMLInputElement>('#mcp-fc');
+  const fvEl = q<HTMLInputElement>('#mcp-fv');
+  const fpEl = q<HTMLInputElement>('#mcp-fp');
+  const fipEl = q<HTMLInputElement>('#mcp-fip');
+  const frfCanvas = q<HTMLCanvasElement>('#mcp-frf');
+  const timeCanvas = q<HTMLCanvasElement>('#mcp-time');
+  const readout = q<HTMLDivElement>('#mcp-readout');
+  const figSfb = q<HTMLElement>('#mcp-fig-sfb');
+  const figCls = q<HTMLElement>('#mcp-fig-cls');
+
+  const TWO_PI = 2 * Math.PI;
+  const J = 1e-5, BP = 1e-5;      // the shaft is fixed; the bandwidths are the subject
+  const AMP = 1;                  // rad
+
+  const sig = (x: number, d = 3) => {
+    if (!isFinite(x)) return '—';
+    if (x !== 0 && (Math.abs(x) >= 1e4 || Math.abs(x) < 1e-2)) return x.toExponential(d - 1);
+    return String(Number(x.toPrecision(d)));
+  };
+  const deg = (z: Cx) => (Math.atan2(z[1], z[0]) * 180) / Math.PI;
+
+  type Path = 'sfb-w' | 'sfb' | 'cls' | 'cls-ff';
+  const NAMES: Record<Path, string> = {
+    'sfb-w': 'state feedback, θ* and ω*', 'sfb': 'state feedback, θ* only',
+    'cls': 'classical, no feedforward', 'cls-ff': 'classical with feedforward',
+  };
+
+  function gains(fv: number, fp: number, fip: number) {
+    const ba = J * TWO_PI * fv - BP;
+    const B = BP + ba;
+    const Ks = B * TWO_PI * fp;
+    const Ki = Ks * TWO_PI * fip;
+    // Classical: K_pv = b_a, and K_pp solves b_a K_pp^2 - K_sa K_pp + K_isa = 0.
+    const disc = Ks * Ks - 4 * ba * Ki;
+    const Kpp = disc >= 0 ? (Ks + Math.sqrt(disc)) / (2 * ba) : NaN;
+    const Kiv = Ki / Kpp;
+    return { ba, B, Ks, Ki, Kpv: ba, Kpp, Kiv, classical: disc >= 0 && ba > 0 };
+  }
+  type G = ReturnType<typeof gains>;
+
+  function numerator(p: Path, g: G): number[] {
+    if (p === 'sfb') return [0, g.Ks, g.Ki];
+    if (p === 'cls') return [0, g.Kpp * g.Kpv, g.Kpp * g.Kiv];
+    return [g.ba, g.Ks, g.Ki];          // sfb-w, and cls-ff which is the same
+  }
+
+  /** Block diagram of the selected path, written out state by state. */
+  function deriv(p: Path, g: G, x: number[], t: number, w: number): number[] {
+    const [th, om, xi] = x;
+    const thc = AMP * Math.sin(w * t), omc = AMP * w * Math.cos(w * t);
+    let T: number, dxi: number;
+    if (p === 'sfb' || p === 'sfb-w') {
+      const wstar = p === 'sfb-w' ? omc : 0;
+      T = g.ba * (wstar - om) + g.Ks * (thc - th) + g.Ki * xi;     // xi = integral of position error
+      dxi = thc - th;
+    } else {
+      const wcmd = g.Kpp * (thc - th) + (p === 'cls-ff' ? omc : 0);
+      const ev = wcmd - om;
+      T = g.Kpv * ev + g.Kiv * xi;                                 // xi = integral of velocity error
+      dxi = ev;
+    }
+    return [om, (T - BP * om) / J, dxi];
+  }
+
+  /** Exact theta(t) for theta* = AMP sin(w t) from rest: residues plus steady state. */
+  function exactResponse(num: number[], den: number[], w: number) {
+    let poles = polyRoots(den);
+    // Partial fractions need distinct poles; nudge a coincident pair apart by
+    // a relative 1e-7, far below anything a plot can show.
+    poles = poles.map((p, i) => (poles.some((r, j) => j < i && cAbs(cSub(p, r)) < 1e-7 * cAbs(p))
+      ? cAdd(p, [1e-7 * cAbs(p), 0]) : p));
+    const dden = den.slice(0, -1).map((c, k) => c * (den.length - 1 - k));
+    const res = poles.map((p) => cDiv(cMul(polyEval(num, p), [AMP * w, 0]),
+                                      cMul(polyEval(dden, p), cAdd(cMul(p, p), [w * w, 0]))));
+    const H = cDiv(polyEval(num, [0, w]), polyEval(den, [0, w]));
+    const mag = cAbs(H), ph = Math.atan2(H[1], H[0]);
+    return {
+      H, poles,
+      at: (t: number) => AMP * mag * Math.sin(w * t + ph)
+        + res.reduce((s, r, k) => s + cMul(r, cExp(cMul(poles[k], [t, 0])))[0], 0),
+    };
+  }
+
+  function draw() {
+    const path = pathEl.value as Path;
+    const fc = Math.pow(10, parseFloat(fcEl.value));
+    const fv = Math.pow(10, parseFloat(fvEl.value));
+    const fp = Math.pow(10, parseFloat(fpEl.value));
+    const fip = Math.pow(10, parseFloat(fipEl.value));
+    const g = gains(fv, fp, fip);
+    const den = [J, g.B, g.Ks, g.Ki];
+    const w = TWO_PI * fc;
+    const isCls = path === 'cls' || path === 'cls-ff';
+
+    q<HTMLOutputElement>('#mcp-fc-v').value = sig(fc);
+    q<HTMLOutputElement>('#mcp-fv-v').value = sig(fv);
+    q<HTMLOutputElement>('#mcp-fp-v').value = sig(fp);
+    q<HTMLOutputElement>('#mcp-fip-v').value = sig(fip);
+    figSfb.hidden = isCls;
+    figCls.hidden = !isCls;
+    setFigureActive(root, { wstar: path === 'sfb-w', ff: path === 'cls-ff' });
+    setFigureValues(root, {
+      J: `${J.toExponential(1)} kg·m²`, bp: `${BP.toExponential(1)}`,
+      fv: `${sig(g.ba)} N·m·s/rad`, fp: `${sig(g.Ks)} N·m/rad`, fip: `${sig(g.Ki)} N·m/(rad·s)`,
+      'kpp fp': g.classical ? `${sig(g.Kpp)} 1/s` : 'none',
+      'kpi fv fip': g.classical ? `K_pv ${sig(g.Kpv)}, K_iv ${sig(g.Kiv)}` : 'none',
+    });
+
+    const colors = themeColors();
+    const avail = (p: Path) => !(p === 'cls' || p === 'cls-ff') || g.classical;
+
+    /* ---------------- command frequency response ---------------- */
+    const F_LO = Math.floor(Math.log10(Math.min(fip, fc)) - 1);
+    const F_HI = Math.ceil(Math.log10(Math.max(fv, fc)) + 1);
+    const curves: Array<[Path, string]> = [['sfb-w', colors.series[2]], ['sfb', colors.series[1]], ['cls', colors.series[3]]];
+    const Y_LO = -3, Y_HI = 0.5;
+    const fv_ = makeView(frfCanvas, { xMin: F_LO, xMax: F_HI, yMin: Y_LO, yMax: Y_HI, pad: 38 });
+    drawAxes(fv_, { xTicks: decades(F_LO, F_HI), yTicks: decades(Y_LO, Y_HI), xTickLabel: decadeLabel,
+                    yTickLabel: decadeLabel, xLabel: 'f [Hz]', yLabel: '|θ/θ*|', origin: false });
+    drawPolyline(fv_, [[F_LO, 0], [F_HI, 0]], colors.muted, 1, [4, 4]);
+    drawPolyline(fv_, [[Math.log10(fc), Y_LO], [Math.log10(fc), Y_HI]], colors.accent, 1, [2, 3]);
+    label(fv_, 'fc', [Math.log10(fc), Y_LO + 0.15], colors.accent, 'center');
+    for (const [p, col] of curves) {
+      if (!avail(p)) continue;
+      const num = numerator(p, g);
+      const pts: Array<[number, number]> = [];
+      for (let n = 0; n <= 400; n++) {
+        const lf = F_LO + ((F_HI - F_LO) * n) / 400;
+        const s: Cx = [0, TWO_PI * Math.pow(10, lf)];
+        const m = cAbs(polyEval(num, s)) / cAbs(polyEval(den, s));
+        pts.push([lf, Math.max(Y_LO - 1, Math.log10(m))]);
+      }
+      const selected = p === path || (p === 'sfb-w' && path === 'cls-ff');
+      drawPolyline(fv_, pts, col, selected ? 3 : 1.3);
+    }
+    label(fv_, 'θ* and ω*', [F_LO + 0.1, 0.2], colors.series[2]);
+
+    /* ---------------- time response ---------------- */
+    const num = numerator(path, g);
+    const ex = exactResponse(num, den, w);
+    const slow = Math.min(...ex.poles.map((p) => Math.abs(p[0])));
+    const fast = Math.max(...ex.poles.map(cAbs), w);
+    // Wait for the start-up to die away, but not forever: near the Routh
+    // boundary (f_v close to f_ip) the slowest pole hardly decays, and then
+    // the readout says the run had not settled instead of quoting it.
+    const wantSettle = 9 / slow;
+    const tSettle = Math.min(wantSettle, 5e4 / fast);
+    const unsettled = wantSettle > tSettle * (1 + 1e-9);
+    const tWin = 3 / fc;
+    const sim: Array<[number, number]> = [], cmd: Array<[number, number]> = [], exact: Array<[number, number]> = [];
+    let maxGap = 0, errSim = 0, maxTh = 0;
+    if (avail(path)) {
+      // Coarse steps through the start-up, then the window on an exact grid,
+      // each window sample subdivided so no step exceeds 0.2/|fastest rate|.
+      let x = [0, 0, 0], t = 0;
+      const step = (h: number) => {
+        const a = deriv(path, g, x, t, w);
+        const b = deriv(path, g, x.map((v, j) => v + (h / 2) * a[j]), t + h / 2, w);
+        const c = deriv(path, g, x.map((v, j) => v + (h / 2) * b[j]), t + h / 2, w);
+        const d = deriv(path, g, x.map((v, j) => v + h * c[j]), t + h, w);
+        x = x.map((v, j) => v + (h / 6) * (a[j] + 2 * b[j] + 2 * c[j] + d[j]));
+        t += h;
+      };
+      const hMax = 0.2 / fast;
+      while (t < tSettle - 1e-12) step(Math.min(hMax, tSettle - t));
+      const N_WIN = 600, hWin = tWin / N_WIN, sub = Math.max(1, Math.ceil(hWin / hMax));
+      for (let k = 1; k <= N_WIN; k++) {
+        for (let m = 0; m < sub; m++) step(hWin / sub);
+        const e = ex.at(t), thc = AMP * Math.sin(w * t);
+        sim.push([t - tSettle, x[0]]); exact.push([t - tSettle, e]); cmd.push([t - tSettle, thc]);
+        maxGap = Math.max(maxGap, Math.abs(e - x[0]));
+        errSim = Math.max(errSim, Math.abs(thc - x[0]));
+        maxTh = Math.max(maxTh, Math.abs(x[0]));
+      }
+    }
+    const yr = Math.max(1.15 * AMP, 1.1 * maxTh);
+    const tv = makeView(timeCanvas, { xMin: 0, xMax: tWin, yMin: -yr, yMax: yr, pad: 38 });
+    drawAxes(tv, { xTicks: [tWin / 3, (2 * tWin) / 3, tWin], yTicks: [-AMP, AMP],
+                   xTickLabel: (v) => `+${sig(v, 2)}`, yTickLabel: (v) => sig(v, 2),
+                   xLabel: `t − ${sig(tSettle, 2)} s`, yLabel: 'θ [rad]' });
+    drawPolyline(tv, cmd, colors.muted, 1.2);
+    drawPolyline(tv, sim, colors.series[0], 4);
+    drawPolyline(tv, exact, colors.accent, 1.6);
+
+    /* ---------------- readout ---------------- */
+    const errExact = AMP * cAbs(cSub([1, 0], ex.H));
+    const rows = (['sfb-w', 'sfb', 'cls', 'cls-ff'] as Path[]).map((p) => {
+      if (!avail(p)) return `<tr><th>${NAMES[p]}</th><td colspan="2">no real K<sub>pp</sub>, K<sub>iv</sub> give these poles</td></tr>`;
+      const H = cDiv(polyEval(numerator(p, g), [0, w]), polyEval(den, [0, w]));
+      return `<tr${p === path ? ' class="hot-row"' : ''}><th>${NAMES[p]}</th><td>|θ/θ*| = ${sig(cAbs(H))}, ${sig(deg(H))}°</td>`
+           + `<td>error amplitude ${sig(AMP * cAbs(cSub([1, 0], H)))} rad</td></tr>`;
+    }).join('');
+    const poleTxt = ex.poles.filter((p) => p[1] >= 0).map((p) => (Math.abs(p[1]) > 1e-9 * cAbs(p)
+      ? `${sig(p[0] / TWO_PI)} ± j${sig(p[1] / TWO_PI)}` : sig(p[0] / TWO_PI))).join(', ');
+    const verdict: Record<Path, string> = {
+      'sfb-w': 'With ω* the command enters through the same three gains as the feedback, so the numerator matches the denominator in its b<sub>a</sub>, K<sub>sa</sub> and K<sub>isa</sub> terms. What is left over is J<sub>p</sub>s³ + b<sub>p</sub>s², which only matters toward the velocity loop’s bandwidth.',
+      'sfb': 'Without ω*, b<sub>a</sub> acts on −ω alone and resists the commanded motion like a damper. The left-over is J<sub>p</sub>s³ + (b<sub>p</sub> + b<sub>a</sub>)s², so the tracking error is set by the position loop, a decade lower than with ω*.',
+      'cls': 'Same denominator, same poles, same stiffness, but the command path is K<sub>pp</sub>(b<sub>a</sub>s + K<sub>iv</sub>): the velocity loop only ever sees the position loop’s output as its command.',
+      'cls-ff': 'Velocity feedforward adds b<sub>a</sub>s² + K<sub>iv</sub>s to the command path, which turns it into b<sub>a</sub>s² + K<sub>sa</sub>s + K<sub>isa</sub>: exactly the state feedback controller given ω*.',
+    };
+
+    readout.innerHTML = `
+      <table>
+        <tr><th>state feedback gains</th><td>b<sub>a</sub> = ${sig(g.ba)} N·m·s/rad, K<sub>sa</sub> = ${sig(g.Ks)} N·m/rad</td>
+            <td>K<sub>isa</sub> = ${sig(g.Ki)} N·m/(rad·s)</td></tr>
+        <tr><th>classical, same poles</th><td>${g.classical
+              ? `K<sub>pv</sub> = b<sub>a</sub> = ${sig(g.Kpv)}, K<sub>pp</sub> = ${sig(g.Kpp)} 1/s`
+              : 'K<sub>pp</sub> would be complex: the position and integral loops are too close'}</td>
+            <td>${g.classical ? `K<sub>iv</sub> = ${sig(g.Kiv)} N·m/(rad·s)` : ''}</td></tr>
+        <tr><th>closed-loop poles</th><td colspan="2">${poleTxt} Hz — the same for every path (J<sub>p</sub> = b<sub>p</sub> = 10⁻⁵)</td></tr>
+        ${rows}
+        <tr><th>this run</th><td>${!avail(path) ? '—' : unsettled
+              ? `start-up not died away by ${sig(tSettle, 2)} s: largest error in the window ${sig(errSim)} rad`
+              : `error amplitude after ${sig(tSettle, 2)} s: ${sig(errSim)} rad`}</td>
+            <td>closed form ${sig(errExact)} rad</td></tr>
+        <tr><th>exact vs RK4</th><td colspan="2">${!avail(path) ? '—' : maxGap < 1e-4 * AMP
+              ? `max difference <b>${maxGap.toExponential(1)}</b> rad — the two agree`
+              : `max difference ${maxGap.toExponential(2)} rad`}</td></tr>
+      </table>
+      <p class="note">${avail(path) ? verdict[path] : 'Pick bandwidths further apart: the cascade needs f<sub>p</sub> at least about four times f<sub>ip</sub>.'}</p>`;
+  }
+
+  [fcEl, fvEl, fpEl, fipEl].forEach((el) => el.addEventListener('input', draw));
+  pathEl.addEventListener('change', draw);
+  window.addEventListener('resize', draw);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', draw);
+  bindFigureHighlight(root);
+  draw();
+</script>

@@ -1,0 +1,20 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { href } from '../../lib/href';
+import Widget from '../../components/StiffnessBandwidth.astro';
+---
+
+<BaseLayout title="Dynamic Stiffness, Bandwidth and the Bode Plot — ECE/ME 732">
+  <p class="crumb"><a href={href("/interactives/")}>← Interactives</a></p>
+  <h1>Dynamic Stiffness, Bandwidth and the Bode Plot</h1>
+  <p class="lede">
+    The same shaft and the same three state feedback gains, but here the gains
+    are the sliders and the bandwidths are what comes out. Each crossing on
+    the stiffness plot is set by two gains. Beside it, the same frequencies on
+    Bode plots: the velocity loop alone, the position loop's open-loop gain,
+    and the closed loop with and without the velocity command. Below, a load
+    step and a sine command, solved exactly, so a number read off the Bode plot
+    can be checked against the time trace.
+  </p>
+  <Widget />
+</BaseLayout>
